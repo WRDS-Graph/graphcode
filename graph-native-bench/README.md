@@ -60,3 +60,39 @@ node extension/impact-ranker-v2.test.mjs
 # held-out offline validation (requires the codegraph CLI + an indexed repo)
 node bench/validate-ranker-v2.mjs --ranker ../extension/impact-ranker-v2.mjs
 ```
+
+## Update — multi-run robustness + 4th arm (potpie)
+
+A follow-up pass hardened the evaluation and added a fourth comparison point. New artifacts:
+
+- **`harness/graphcode-claude-runner.mjs`** — re-homes the graph-native arm onto the **Claude
+  subscription** (`claude -p`, no API key). All arms now run on the *same* gateway, removing the
+  pi/`civitas` confound in the earlier results.
+- **Multi-run CIs** (`bench/score-matrix-ci.mjs`): 3 arms × 3 impact tasks × n=3, hardened F1.
+  Aggregate mean F1 **graph-native 0.79 vs plain 0.56 vs graph-MCP 0.50**; graph-native is the
+  cheapest arm on every task (0 read / 0 grep). On the `Resource` hub the MCP arm **collapses to
+  0.07** (it has the graph but under-ranks a 982-file firehose); graph-native scores 0.56.
+- **potpie graph-engine comparison** (`bench/score-potpie-graph.mjs`): potpie's raw name-reference
+  blast radius (held-out F1 0.383) out-recalls codegraph's raw `impact` (0.169), but codegraph's
+  **v2 ranker (0.519) beats both raw graphs** — the ranking layer is the win. potpie's *agent* layer
+  needs a paid API key and a multi-service Docker stack (can't run on a subscription).
+- **co-change ranker signal** (`extension/impact-ranker-v3.mjs`, `bench/mine-cochange.mjs`): mines
+  git history for files that change together with the anchor. **Honest negative result** — a real
+  signal, but neutral-to-negative at top-20; shipped as an opt-in at neutral weight, not a win
+  (`bench/COCHANGE-FINDING.md`).
+
+Full write-up: **`bench/ROBUSTNESS-REPORT.md`**. Visual report (figure-driven):
+**`bench/report/graphnative-visual.pdf`** (regenerate figures with `bench/report/make-figs.py`).
+Benchmark design + discovered environment constraints: `bench/BENCHMARK-4ARM-DESIGN.md`.
+Concrete per-arm transcript case studies: `bench/CONCRETE-EXAMPLES.md`.
+
+```bash
+# reproduce the multi-run matrix score (after running the matrix)
+node bench/score-matrix-ci.mjs --tasks I1,I8,I10 \
+  --arms control,codegraph,graphcode-native-claude --runs 101,102,103 --budget 20
+# potpie graph vs codegraph impact on the same gold
+node bench/score-potpie-graph.mjs --budget 20
+# co-change ranker (honest negative): build cache, then validate held-out
+node bench/mine-cochange.mjs --all
+node bench/validate-ranker-v3.mjs --ranker ../extension/impact-ranker-v3.mjs --diag
+```

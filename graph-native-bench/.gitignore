@@ -1,3 +1,8 @@
 .cg-cache/
 *.result.json
 result-flow-trace.json
+.cochange-cache/
+.potpie-cache/
+*.aux
+*.log
+*.out

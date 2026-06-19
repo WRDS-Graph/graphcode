@@ -1,0 +1,311 @@
+\documentclass[11pt,twocolumn]{article}
+
+\usepackage[margin=0.8in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{fancyvrb}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{balance}
+\usepackage{microtype}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{RGB}{20,70,120}
+\definecolor{win}{RGB}{20,110,60}
+\definecolor{bad}{RGB}{160,40,40}
+\titleformat{\section}{\large\bfseries\color{accent}}{\thesection}{0.5em}{}
+\titleformat{\subsection}{\normalsize\bfseries}{\thesubsection}{0.5em}{}
+\titlespacing\section{0pt}{8pt}{4pt}
+\titlespacing\subsection{0pt}{6pt}{3pt}
+
+\fvset{fontsize=\scriptsize,frame=single,framesep=4pt,xleftmargin=2pt,xrightmargin=2pt}
+\setlist{leftmargin=1.2em,topsep=2pt,itemsep=1pt}
+\emergencystretch=2em  % absorb tiny overfulls from long \texttt{} identifiers
+
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\gn}{{\normalfont\scshape GraphNative}}
+\newcommand{\mcp}{{\normalfont\scshape Graph-MCP}}
+\newcommand{\plain}{{\normalfont\scshape Plain}}
+\newcommand{\hit}[1]{\textcolor{win}{#1}}
+\newcommand{\miss}[1]{\textcolor{bad}{#1}}
+
+\title{\vspace{-1.4cm}\bfseries Why Graph-Native Beats Graph-as-a-Tool:\\[2pt]
+\large A Case Study in Code-Impact Analysis on Apache Hadoop}
+\author{}
+\date{}
+
+\begin{document}
+\twocolumn[
+  \begin{@twocolumnfalse}
+  \maketitle
+  \vspace{-1.2cm}
+  \begin{abstract}
+  \noindent
+  A coding agent can use a code graph in two ways: as an \emph{optional MCP tool} it chooses to
+  call and must rank in-context, or \emph{natively}---with the harness querying and ranking the
+  graph before the agent's first token. We show, with real run data on Apache Hadoop
+  (14{,}574 Java files), that these are not equivalent. Holding the model
+  (\texttt{claude-sonnet-4-6}), the repository, the prompt, and \emph{the underlying graph engine}
+  fixed across arms---so the only variable is \emph{where ranking happens}---a graph-native harness
+  attains a mean impact-analysis $F_1$ of \best{0.79} versus \best{0.50} for the same agent with the
+  same graph attached over MCP and \best{0.56} for a tool-free baseline, at three runs per cell with
+  non-overlapping confidence intervals, while being the cheapest arm on every task. We dissect two
+  tasks at the level of \emph{which files each arm actually named}. On a hub class
+  (\texttt{Resource}, an 982-file blast radius) the MCP arm \emph{collapses} to $F_1\,0.07$: it
+  surfaces only 2 of 25 true dependents because it must rank a firehose mid-reasoning, while the
+  native harness surfaces 13 of 25 from a pre-ranked draft. On a smaller task
+  (\texttt{AbfsOutputStream}) all three arms find every true dependent, but only the native arm
+  excludes the test-file noise that drags the others to $F_1\,0.67$---it commits exactly the 10 gold
+  files, $F_1\,1.00$. The lesson is concrete: the graph's value is unlocked by \emph{relocating
+  ranking out of the model's context and into the harness}, not by exposing a better tool.
+  \vspace{0.35cm}
+  \end{abstract}
+  \end{@twocolumnfalse}
+]
+
+\section{The Question, Made Concrete}
+
+Before an agent changes a method it must know what depends on it. A code graph answers this
+exactly---\texttt{impact(symbol)} returns the reverse-reachability set. The catch: on a real
+codebase that set is a \emph{firehose}. For \texttt{Resource} in Hadoop it is 982 files at
+recall~1.0 but precision~0.06. The hard part is not \emph{retrieving} the dependents; it is
+\emph{ranking} the 25 that matter above the 957 that don't, under a budget.
+
+This paper asks where that ranking should happen. Two designs:
+\begin{itemize}
+  \item \mcp{} (graph-as-a-tool): the agent is given the code graph as an MCP server. It decides
+  when to call \texttt{impact}/\texttt{callers}, and must rank the returned firehose \emph{in its
+  own context, while also reasoning about the task}.
+  \item \gn{} (graph-native harness): \emph{before} the agent's first token, the harness runs the
+  graph queries, ranks the result with a deterministic structural ranker, drops test files, and
+  hands the agent a short, mostly-correct draft to \emph{refine}.
+\end{itemize}
+Both use the identical graph engine (\textsc{codegraph}; tree-sitter\,$\to$\,SQLite). The only
+difference is \emph{when and where} ranking occurs. We show this difference is decisive.
+
+\paragraph{Setup.} All arms run the same model (\texttt{claude-sonnet-4-6}) headlessly through the
+same \texttt{claude -p} invocation on a Claude subscription (no API key), differing only in harness
+wiring. Tasks are 12 impact questions derived from real merged Hadoop PRs; the gold set $G$ for each
+is the actual caller/dependent files touched in that PR. The metric is $F_1$ of the agent's
+committed \texttt{dependent\_files} list against $G$ (basename set-match), truncated to a budget of
+$k{=}20$---so dumping the firehose tanks precision, and the task becomes \emph{ranking the right few}.
+The raw \texttt{impact} query, scored identically, is an oracle \emph{floor} every graph arm must
+clear. We report three runs per cell with 95\% confidence intervals.
+
+\section{Headline: Three Runs, Three Tasks}
+
+Table~\ref{tab:main} is the full matrix. \gn{} wins all three tasks on mean $F_1$, with
+non-overlapping CIs against the runner-up on the two decisive tasks, \emph{and} is the cheapest arm
+everywhere.
+
+\begin{table}[t]\centering\footnotesize
+\setlength{\tabcolsep}{3.5pt}
+\renewcommand{\arraystretch}{1.12}
+\caption{Impact-analysis $F_1$ at budget $k{=}20$, mean\,$\pm$\,95\% CI over $n{=}3$ runs, single
+\texttt{claude} gateway. \textsc{Cost} is mean USD/run; \textsc{R/G} is mean Read/Grep calls. Best
+per row bold.}\label{tab:main}
+\begin{tabular}{lcccc}
+\toprule
+ & \plain{} & \mcp{} & \best{\gn{}} & oracle \\
+\midrule
+\multicolumn{5}{l}{\textit{I1 \texttt{Resource} --- hub, 982-file blast radius (gold 25)}}\\
+$F_1$    & 0.27\,$\pm$.11 & 0.07\,$\pm$.06 & \best{0.56\,$\pm$.06} & 0.00 \\
+cost     & \$0.53 & \$0.38 & \best{\$0.27} & --- \\
+R/G      & 0/13 & 0/1 & \best{0/0} & --- \\
+\midrule
+\multicolumn{5}{l}{\textit{I8 \texttt{AbfsClient} --- clean caller tree (gold 19)}}\\
+$F_1$    & 0.74\,$\pm$.29 & 0.77\,$\pm$.00 & \best{0.82\,$\pm$.00} & 0.36 \\
+cost     & \$0.57 & \$0.38 & \best{\$0.28} & --- \\
+R/G      & 0/28 & 0/0 & \best{0/0} & --- \\
+\midrule
+\multicolumn{5}{l}{\textit{I10 \texttt{AbfsOutputStream} (gold 10)}}\\
+$F_1$    & 0.67\,$\pm$.00 & 0.67\,$\pm$.00 & \best{1.00\,$\pm$.00} & 0.47 \\
+cost     & \$0.71 & \$0.39 & \best{\$0.31} & --- \\
+R/G      & 0/29 & 0/0 & \best{0/0} & --- \\
+\midrule
+\best{Mean $F_1$} & 0.56 & 0.50 & \best{0.79} & 0.28 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two facts deserve emphasis before the case studies. First, \gn{} does \best{zero} file reads and
+\best{zero} greps on every task: the graph fully displaces filesystem exploration. \plain{} grep-storms
+(13--29 greps/task). Second, the arms' \emph{variance} differs: \gn{} and \mcp{} are near-deterministic
+($\pm.00$ on I8/I10), while \plain{} is high-variance ($\pm.29$ on I8)---grep-storm success is
+luck-dependent. Robustness is not only a higher mean; it is a tighter one.
+
+We now open the two decisive tasks and look at exactly which files each arm named.
+
+\section{Case Study 1 --- The Hub (\texttt{Resource})}
+
+\texttt{Resource} is a YARN god-object: 982 files reference it transitively. The PR
+(YARN-11964, clamp negative values) touched 25 of them. This is the pure ranking task---recall is
+trivial (the graph contains all 25), precision under budget is everything.
+
+\paragraph{What the arms named (top 20, run r101).}
+The gold set (25): {\scriptsize\texttt{Resources, DominantResourceCalculator, AbstractLeafQueue,
+ResourceUsage, ResourceCalculator, DefaultResourceCalculator, AbstractCSQueue, QueueMetrics,
+FSAppAttempt, FSQueue, AbstractYarnScheduler, RLESparseResourceAllocation, QueueResourceQuotas,
+\ldots}}
+
+\begin{Verbatim}[label={Plain (control) -- 74 files; 6/25 gold in top 20}]
+LightWeightResource, ResourcePBImpl, *Resources,
+*DefaultResourceCalculator, *DominantResource-
+Calculator, FifoScheduler, FairScheduler,
+FSLeafQueue, FSParentQueue, *FSQueue,
+FSQueueMetrics, ConfigurableResource,
+*AbstractLeafQueue, CapacitySchedulerConfig,
+CSQueueMetrics, ..., *QueueMetrics
+   (* = one of the 25 true dependents)
+\end{Verbatim}
+
+\begin{Verbatim}[label={Graph-MCP -- 26 files; only 2/25 gold in top 20}]
+LightWeightResource, ResourcePBImpl, *Resources,
+TestResource, CapacityScheduler, *FSQueue,
+DominantResourceFairnessPolicy, AppInfo,
+NodeManager, ContainerManagerImpl,
+RMContainerAllocator, GetResourceProfile-
+ResponsePBImpl, ServiceApiUtil, NodeManager,
+TestFifoScheduler, TestFairScheduler, ...
+\end{Verbatim}
+
+\begin{Verbatim}[label={GraphNative -- 35 files; 13/25 gold in top 20}]
+LightWeightResource, ResourcePBImpl, *Resources,
+*DominantResourceCalculator, *DefaultResource-
+Calculator, *ResourceCalculator, *ResourceUsage,
+*AbstractLeafQueue, *FSAppAttempt, *AbstractCSQueue,
+CapacitySchedulerConfig, *QueueMetrics,
+*AbstractYarnScheduler, *FSQueue, FairScheduler,
+*RLESparseResourceAllocation, RMContainerRequestor,
+RMContainerAllocator, *QueueResourceQuotas, RMNodeImpl
+\end{Verbatim}
+
+\paragraph{Reading the result.} All three arms see the \emph{same} 982-file graph. What differs is
+what reaches the top 20:
+\begin{itemize}
+  \item \plain{} (\textcolor{bad}{$F_1$ 0.27}) brute-forces with 13 greps, names \emph{74} files, and
+  buries the 6 true dependents it does find among scheduler/config noise. Over-enumeration is a
+  precision tax.
+  \item \mcp{} (\textcolor{bad}{$F_1$ 0.07}) is the cautionary case. It \emph{has} the graph and
+  calls it (7 graph calls), but having pulled a 982-file firehose into context it cannot rank it
+  while also reasoning, so it commits a short, hedged list seeded by surface name-matches and
+  unrelated managers (\texttt{NodeManager}, \texttt{AppInfo}, \texttt{TestResource})---landing only
+  \emph{2 of 25}. The tool was present; the ranking was absent.
+  \item \gn{} (\textcolor{win}{$F_1$ 0.56}) starts from the harness's pre-ranked, test-free draft and
+  refines it. Its top 20 contains \emph{13 of 25} true dependents---the dense, genuinely-coupled
+  resource/queue/scheduler classes---because reference-density and caller ranking were computed in
+  code \emph{before} the agent had to think.
+\end{itemize}
+Same model, same graph, same budget. The $8\times$ gap between \gn{} and \mcp{} is entirely
+\emph{where the firehose got ranked}. This is the paper's thesis in one task.
+
+\section{Case Study 2 --- The Test-File Trap (\texttt{AbfsOutputStream})}
+
+The second task is the opposite regime: a \emph{small} blast radius (gold 10). Here recall is easy
+for everyone---and indeed all three arms find all 10 true dependents. The difference is what
+\emph{else} they put in the top 20.
+
+\begin{table}[h]\centering\footnotesize
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.1}
+\caption{I10: every arm achieves recall 1.0 (all 10 gold found). Precision is decided by false
+positives in the top 20.}\label{tab:i10}
+\begin{tabular}{lccc}
+\toprule
+ & gold found & false-pos & $F_1$ \\
+\midrule
+\plain{}        & 10/10 & 10 (5 tests) & 0.67 \\
+\mcp{}          & 10/10 & 10 (7 tests) & 0.67 \\
+\best{\gn{}}    & \best{10/10} & \best{0} & \best{1.00} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The false positives are revealing. \plain{} pads with \texttt{TestAbfsOutputStream},
+\texttt{ITestAbfsOutputStream}, \texttt{AbstractAbfsIntegrationTest}, \ldots; \mcp{} pads with
+\texttt{ITestAzureBlobFileSystemChecksum}, \texttt{ITestAbfsOutputStreamStatistics}, \ldots\ Both
+arms let test files---which exhibit the \emph{highest} reference density on a real codebase, and are
+\emph{never} the answer in a production fix---consume budget slots, halving precision to 0.50.
+
+\gn{} commits \best{exactly the 10 gold files, zero false positives}. The reason is a single
+deterministic rule in the harness ranker: \emph{test-file demotion}. Files matching
+\texttt{Test*}/\texttt{*Test}/\texttt{ITest*}/\texttt{/test/} are pushed below every production
+candidate before the draft is built. The agent never has to relearn, mid-task, that
+\texttt{TestAbfsOutputStream} is not a dependent---the harness already knew.
+
+\section{Why the Ranker, Not the Tool, Is the Win}
+
+The two case studies isolate the mechanism. We can also measure it directly, with no agent in the
+loop, by scoring the raw graph output against gold (Table~\ref{tab:ranker}). The raw \texttt{impact}
+firehose scores $F_1\,0.169$ (held-out, $n{=}9$). A purely structural ranker over the \emph{same}
+graph---reference density, an additive direct-caller bonus, type-name inheritance match, and
+test-file demotion---triples it to \best{0.519}, beating the raw-graph floor on all 9 held-out tasks.
+This ranker is what the harness injects at turn~0; it is gold-blind and validated on tasks never used
+for tuning.
+
+\begin{table}[h]\centering\footnotesize
+\setlength{\tabcolsep}{6pt}
+\renewcommand{\arraystretch}{1.1}
+\caption{Held-out ranking quality ($n{=}9$, never tuned), no agent. The ranker---a harness
+component---is where the graph's value is realized.}\label{tab:ranker}
+\begin{tabular}{lc}
+\toprule
+ & mean $F_1$ \\
+\midrule
+raw \texttt{impact} firehose (floor) & 0.169 \\
+\;+ structural ranker (turn-0) & \best{0.519} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The point is that \mcp{} \emph{has access to the identical \texttt{impact} query}---it simply has to
+rank the output in-context, which Case Study~1 shows it does poorly on a hub. Moving that ranking
+into deterministic harness code, run before the agent's first token, is the entire delta. It is a
+\emph{harness} property, not a \emph{tool} property.
+
+\section{An Honest Foil: potpie}
+
+To check that this is a property of native integration rather than of \textsc{codegraph}
+specifically, we ran the same gold against a second graph product, \emph{potpie} (a Neo4j +
+tree-sitter codebase-intelligence system). Two findings, both disclosed plainly:
+\begin{itemize}
+  \item \textbf{Operability.} potpie's LLM agents require a paid API key and a multi-service Docker
+  stack; they cannot run on a Claude subscription. Its \emph{graph} can be built LLM-free, which is
+  what we benchmarked. \textsc{codegraph}'s whole graph-native arm, by contrast, runs on the
+  subscription from a single local binary.
+  \item \textbf{Graph quality vs.\ ranking.} potpie's raw name-reference blast radius actually
+  \emph{out-recalls} \textsc{codegraph}'s raw \texttt{impact} at top-20 (held-out $F_1$ 0.383 vs
+  0.169)---a creditable graph. But \textsc{codegraph}'s \emph{ranked} output (0.519) beats both raw
+  graphs, and on the \texttt{Resource} hub potpie's 603-file \emph{unranked} set scores $F_1\,0.00$
+  at top-20 while \gn{} scores 0.56. (Caveat: potpie's set is undirected name-reference---higher
+  recall, lower precision than a directed query---and unranked, so this is a statement about raw
+  recall, not delivered quality.)
+\end{itemize}
+The cross-product comparison reinforces the thesis: a good raw graph is necessary but not
+sufficient; the \emph{ranking and pre-computation layer}---a harness responsibility---is what turns a
+graph into answers.
+
+\section{Threats to Validity}
+\textbf{Construct.} These tasks measure impact \emph{retrieval} (a ranked file list), not code
+synthesis; the draft-to-refine mechanism is partly self-fulfilling within this construct, and
+transferring the result to a diff-producing, test-pass-scored task is the natural next step.
+\textbf{External.} One Java repository; the structural signals reflect general dependency-graph and
+JVM naming conventions but cross-language generalization is unmeasured. \textbf{Scope.} $n{=}3$ over
+three tasks spanning the difficulty range; the aggregate gap is more robust than any single cell, and
+no arm sweeps---\plain{} and \mcp{} are within noise of each other and of \gn{} on the clean task,
+which is the honest, discriminative picture.
+
+\section{Conclusion}
+Exposing a code graph to an agent as an MCP tool under-uses it: the agent must both choose to call it
+and rank a firehose mid-reasoning, and on a hub class it ranks that firehose so poorly it scores
+$8\times$ \emph{below} a native harness using the same graph. Treating the graph as the harness's
+primary retrieval surface---queried and ranked before the first token, test files removed, handed
+over as a draft to refine---wins all three tasks at lower cost and tighter variance, on a held-out,
+gaming-resistant, multi-run benchmark. The gain comes not from a bigger model or a better tool, but
+from relocating retrieval and ranking out of the model's context and into deterministic code where
+the structure of the dependency graph can be exploited directly.
+
+\balance
+\end{document}
