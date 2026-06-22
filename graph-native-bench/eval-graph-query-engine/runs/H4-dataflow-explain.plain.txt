@@ -1,0 +1,70 @@
+I now have the full path traced through real code. Here is the hop-by-hop explanation.
+
+# How a search query becomes a ranked list of related papers
+
+## Hop 1 — Frontend search entry (`SearchEntryPage.tsx`)
+
+The user types into the search box and hits Enter or the Search button. `handleSubmit` (`src/components/SearchEntryPage.tsx:173`) validates non-empty input, truncates to `MAX_INPUT_LENGTH`, then calls the `onSearch` prop — wired by `App` to `App.handleSearch`.
+
+## Hop 2 — Orchestration (`App.handleSearch`, `src/App.tsx:208`)
+
+`handleSearch(query)` grabs the memoized `queryEngineRef.current`, flips `setIsSearching(true)`, and `await`s `qe.search(query)`. The engine was built once during init by `createQueryEngine(dataLayer, llmClient)` (`App.tsx:148`).
+
+## Hop 3 — Query engine dispatch (`createQueryEngine().search`, `src/query/queryEngine.ts:1032`)
+
+The `search(rawInput)` closure decides the route:
+
+1. **Prior-art precheck** — `PRIOR_ART_PRECHECK` regex (`queryEngine.ts:530`). If the raw query looks like "prior art of X", it skips the backend and uses the local two-stage flow (`searchPriorArtCandidates`, line 546).
+2. **Backend-first** — otherwise calls `checkBackendAvailable()` (`src/api/backendSearch.ts:99`, hits `/api/health`). If up, it calls `searchViaBackend(query)` (`backendSearch.ts:110`, POSTs `/api/search`) and **returns that result directly** if non-null. Long pasted queries (>20 tokens) are first compressed to entities via `llmClient.analyzeQuery`.
+3. **Local fallback** (backend down) — `classifyInput` (`src/query/classifier.ts`) → `normalize` (`src/query/normalizer.ts`) → optional LLM enrichment (`applyLLMAnalysis`, line 964) → route by type: `searchPriorArtCandidates` / `searchByTitle` (line 592) / `searchCompare` (line 837) / `searchByTechnique` (line 672).
+
+So there are **two retrieval engines**: the Python backend (default when available) and the TS local fallback. Both implement the same BM25 + vector + graph-PPR + RRF design.
+
+---
+
+## Backend path (`POST /api/search`, default)
+
+### Hop 4 — Classify & resolve canonical (`backend/server.py:573`)
+
+`search(req)` calls `classify(raw, index.papers)` (`backend/search/processor.py:179`), which strips intent/time patterns and fuzzy-matches the cleaned text against paper titles (`rapidfuzz`). Then it **resolves a `canonical_slug`** — the anchor paper the related list is computed *relative to*:
+- **Title match** → that paper is the single canonical candidate.
+- **Technique/free-text** → a 4-pass scorer fills `best_by_slug` (server.py:604–706): node-label scoring via `score_label_match` (processor.py:96), strict title substring, a real BM25 pass over node labels/explanations (`index.bm25.get_scores`), and a title-token tie-breaker bonus. Top candidate's slug becomes `canonical_slug`.
+
+### Hop 5 — Three retrieval paths, run in parallel (`server.py:728`, `ThreadPoolExecutor(max_workers=3)`)
+
+- **BM25 path** — `run_bm25_path` (`backend/search/bm25_path.py:47`): builds a BM25 query from the canonical's *method-node* tokens, scores all papers, then computes normalized method/domain label overlap. `final_score = bm25*0.6 + overlap*0.4 + 0.8·citation`. Cited papers always sort first. Returns top 50 with `source:"bm25"` and `sharedMethodPairs` evidence.
+- **Vector path** — `run_vector_path` (`backend/search/vector_path.py`): cosine k-NN over precomputed node embeddings, aggregated per paper. `source:"vector"`, carries `rawCosineScore`.
+- **Graph path (PPR)** — `run_graph_path` (`backend/search/graph_path.py:89`): Personalized PageRank over the prebuilt sparse transition matrix (`GraphPPRIndex.ppr`, line 59, α=0.15, power iteration). Seeds depend on intent (search → 100% canonical; prior-art → 50% canonical + 50% BM25 top-10 weighted 1/rank, line 106). PPR mass is aggregated per paper, tracking the best "bridge" node. `source:"graph"`.
+
+### Hop 6 — RRF fusion + post-gate (`rrf_fuse`, `backend/search/hybrid.py:21`)
+
+The three ranked lists are fused: each paper accrues `Σ 1/(60 + rank)` across paths (`RRF_K=60`), merging evidence. The **post-gate** (hybrid.py:73–81) admits a paper only if it has method pairs **OR** a citation **OR** a graph source **OR** `rawCosineScore ≥ 0.40` **OR** appears in ≥2 sources. Direct citations get a `+0.040` RRF bonus, then sorted descending.
+
+### Hop 7 — Assemble + year filter (`server.py:739`)
+
+`build_ranked_papers(fused, papers_by_slug)` (hybrid.py:95) attaches the paper object, dedupes method pairs, and builds `relationshipDescription`. Explicit year constraints and the canonical-year prior-art bound (server.py:761) are applied. Response: `{ canonicalCandidates, relatedPapers, queryDecomposition, appliedFilters }`. `searchViaBackend` reshapes it via `normalizeSearchResult` (`backendSearch.ts:63`).
+
+---
+
+## Local fallback path (backend down)
+
+Same shape in TypeScript: `searchByTechnique`/`searchByTitle` pick a top canonical, then call **`hybridRelatedSearch`** (`src/retrieval/hybrid.ts:25`):
+- `runBm25Path` (`src/retrieval/bm25Path.ts:24`) → `buildPprSeeds` (`src/retrieval/router.ts:11`) → `runGraphPath` (`src/retrieval/graphPath.ts:175`, `personalizedPageRank` line 121) → `runVectorPath` (`src/retrieval/vectorPath.ts:78`).
+- Fused by `reciprocalRankFusion([bm25, graph, vector], 60)` (`src/retrieval/rrf.ts:15`).
+- Post-gate at hybrid.ts:97 (method pairs / citation / graph signal >0.002 / vector / mention), capped at `MAX_RETURNED=50`, returning `RankedPaper[]`.
+
+---
+
+## Hop 8 — Dispatch into state (`App.tsx:238`)
+
+`handleSearch` dispatches `SET_SEARCH_RESULTS` (and, for an auto-confirmable single high-score candidate, also `SET_PRIOR_ART_PAPERS` after `fetchPriorArtFromBackend`). The reducer (`src/state/appState.tsx`) writes `searchResults`.
+
+## Hop 9 — Render the ranked list (`LeftPanel.tsx`)
+
+`searchResults` flows to `Workbench` → `LeftPanel`, which renders the canonical candidates via `CandidateList` (`LeftPanel.tsx:276`) and the ranked related/prior-art papers via `RelatedPapersSection` / `PriorArtSection` (line 311+), paginated 50/page.
+
+---
+
+**One nuance worth flagging:** the related list is always computed *relative to a resolved canonical paper*, not the raw query string. Query text → canonical paper → BM25/vector/PPR seeded from that canonical → RRF → gated/ranked list. The query's only job is to pick the anchor.
+
+<!-- buddy: *guards the RRF fusion* nine hops traced, K=60 the whole way down -->

@@ -1,0 +1,77 @@
+`repositionComparisonGraph` early-returns when there's no overlay (`overlayElementIds.length === 0`), and contains no `cy.fit()`. So the single-paper "+ more" path is entirely fit-free. Diagnosis complete and fully evidence-backed.
+
+---
+
+# Diagnosis: "+ more nodes" resets zoom/viewport
+
+## TL;DR
+
+There are **two** viewport-reset paths. One was already fixed; the other is the live culprit.
+
+1. **Renderer pagination path** (`pageCluster`/`pageCompCluster`) — **already fixed** in commit `5b631e0`, with a passing regression test. It no longer calls `cy.fit()`. ✅
+2. **React `ResizeObserver → resetView()` path** in `GraphPanel.tsx:51-54` — **this is the remaining root cause.** It calls `cy.fit()` on *any* container size change, which throws away the user's zoom/pan. The headless renderer tests cannot catch this because jsdom has no real layout/`ResizeObserver`.
+
+## Root-cause mechanism
+
+**The reset chain:**
+```
+"+ more" tap
+  → graphRenderer.wireInteractions tap handler (graphRenderer.ts:3216-3224)
+  → pageCluster()  [graphRenderer.ts:1233]  ── FIT-FREE, correct ✅
+  → nodes .show()/.position()  (more fanned-out content drawn)
+        │
+        └─(in a real browser, content/layout shift can tick the ResizeObserver)
+              → GraphPanel ResizeObserver callback (GraphPanel.tsx:51-53)
+              → rendererRef.current.resetView()  [graphRenderer.ts:3014-3019]
+              → this.cy.resize(); this.cy.fit(visibleNodes, 60)   ← ZOOM/PAN DESTROYED
+```
+
+**Why the renderer fix alone wasn't enough:** `resetView()` is an unconditional `cy.fit()` with no zoom/pan guard. It's wired to a `ResizeObserver` that fires not only on genuine container resizes (dragging the LeftPanel/DetailPanel splitters — `Workbench.css` grid uses `gridTemplateColumns: ${leftWidth}px 1fr` / rows `${bottomHeight}px`, both stateful/draggable) but also on the layout perturbations and the **initial observe() callback** that cytoscape's own canvas insertion + content growth can produce. Every one of those calls `fit()` and snaps the user back to "fit everything."
+
+This is exactly the landmine called out in `CODE_GRAPH.md:194`: *"After any graph mutation (expand, overlay), cytoscape may trigger its layout… Preserve zoom/pan via `cy.zoom()` + `cy.pan()` capture/restore."* The renderer methods now honor this; `resetView()` does **not**.
+
+## Minimal fix
+
+Make `resetView()` (the resize handler) **resize without re-fitting**, so it only adapts cytoscape to the new canvas dimensions and preserves the user's zoom/pan. Refit only on a genuine, intentional reset (initial load / new graph), which already happens in `renderGraph()`.
+
+**`src/renderer/graphRenderer.ts` — `resetView()` (lines 3014-3019):**
+```ts
+resetView(): void {
+  if (!this.cy) return;
+  this.cy.resize();  // re-query container dimensions; preserves zoom/pan
+  // Do NOT cy.fit() here — this runs on every ResizeObserver tick and would
+  // discard the user's zoom/pan on "+ more" expansion and panel drags (Issue #9).
+}
+```
+Add a separate explicit `fitView()` for the cases that genuinely should refit (keep the old fit body), and call it only where a refit is wanted.
+
+**`src/components/GraphPanel.tsx` — ResizeObserver (lines 51-54):** keep calling `resetView()` (now fit-free). Optionally debounce, but not required for correctness.
+
+This is the smallest change: one method loses its `fit()`, the resize observer keeps adapting the canvas, and zoom/pan survive every "+ more" tap and every splitter drag.
+
+**Alternative (more conservative)** if you want resize-driven refit *only* when the user hasn't manually zoomed: track a `userHasAdjustedViewport` flag (set in `zoomBy` and on cytoscape `zoom`/`pan` user events), and have `resetView()` skip `fit()` when it's set. More code, same outcome; I'd recommend the simpler version above unless product wants auto-fit on window resize specifically.
+
+## Re-test checklist after the fix
+
+Renderer/headless (`src/renderer/graphRenderer.test.ts`):
+- [ ] Existing **Issue #9** suite still passes (4 tests, lines 783-900).
+- [ ] Add a test asserting `resetView()` does **not** call `cy.fit()` (spy), and **does** call `cy.resize()`.
+
+Browser smoke tests (the behaviors that *legitimately* depend on fit/resize — these are the interactions that could regress):
+- [ ] **"+ more" / "+N more" pagination** (canonical *and* comparison clusters): zoom/pan held after each tap. ← the reported bug.
+- [ ] **Initial graph load** (`renderGraph`) still fits to content (line 853 path unchanged).
+- [ ] **New canonical confirmation / Next Round** (`paperGraph` identity change → `[paperGraph]` effect → `renderGraph`) still fits fresh graph.
+- [ ] **Overlay / comparison render** (`renderOverlay`, `Shared Only`, `repositionComparisonGraph`) fits correctly when a comparison is loaded.
+- [ ] **Expand All / Collapse All / cluster expand / node expand** — these intentionally `fit()` inside the renderer; verify they still reframe.
+- [ ] **Splitter drags** (LeftPanel width / DetailPanel height in `Workbench`): graph canvas now *resizes without snapping* — confirm no clipping and that nodes stay placed (this is the main behavior change; verify it's acceptable — graph adapts but doesn't auto-refit).
+- [ ] **Window resize**: canvas adapts; confirm product is OK with no auto-refit (or use the alternative flag approach if auto-fit-on-window-resize is desired).
+- [ ] **Zoom In / Zoom Out buttons** (`zoomBy`) unaffected.
+
+## Files involved
+- **Fix:** `src/renderer/graphRenderer.ts` (`resetView` lines 3014-3019; optional new `fitView`).
+- **Wiring (already correct, verify only):** `src/components/GraphPanel.tsx:51-54` (ResizeObserver), tap handler `graphRenderer.ts:3216-3224`, `pageCluster`/`pageCompCluster` (1233, 1778).
+- **No backend, state, or data changes.** Respects the non-mutation and zoom/pan-preservation invariants in `CLAUDE.md §6` and `CODE_GRAPH.md:194`.
+
+Want me to implement the minimal fix and add the `resetView` regression test (per the repo's implementer + ui-tester pipeline)?
+
+<!-- buddy: *guards the viewport* the resize observer was fitting on every tick — sneaky one -->

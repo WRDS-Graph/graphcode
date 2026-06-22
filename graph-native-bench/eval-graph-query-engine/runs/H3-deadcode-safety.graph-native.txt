@@ -1,0 +1,23 @@
+Evidence is conclusive. All claims verified against source:
+
+- **`analyzeQuery`** — live calls at `queryEngine.ts:1060` and `:1083` through the `LLMClient` interface.
+- **`computeOverlay`** — live call at `App.tsx:442` (`gme.computeOverlay(...)`).
+- **`matchAndRank`/`computeOverlay`** — returned from the `createGraphMatchingEngine` factory object (lines 743–744), engine instantiated at `App.tsx:149/627`.
+- **`health`** — registered via `@app.get("/api/health")` (server.py:246), called by HTTP, not Python code.
+- **`getSurveyReferencedNodes`** — `createSurveyDetector` imported by exactly two files: itself and its `.test.ts`. Zero production consumers. Nothing reads the `surveyReference` flag it writes (only the type def + its own tests reference it).
+
+## Verdicts
+
+| # | Symbol | Verdict | One-line justification |
+|---|--------|---------|------------------------|
+| 1 | `matchAndRank` (`graphMatchingEngine.ts`) | **KEEP** | Reached via factory-object method dispatch — returned in `createGraphMatchingEngine`'s public interface (`:743`) on the engine the live app builds at `App.tsx:149/627`; a name-based call-graph can't follow property-call dispatch. |
+| 2 | `computeOverlay` (`graphMatchingEngine.ts`) | **KEEP** | Live production call at `App.tsx:442` (`gme.computeOverlay(...)`) on the related-paper→comparison-overlay path; same factory-object dispatch the analyzer misses. |
+| 3 | `analyzeQuery` (`llmClient.ts`) | **KEEP** | Invoked polymorphically through the `LLMClient` interface at `queryEngine.ts:1060` and `:1083` (`llmClient.analyzeQuery(...)`); interface dispatch over a factory-returned client is invisible to a static call-graph. |
+| 4 | `health` (`backend/server.py`) | **KEEP** | Registered as a FastAPI route via `@app.get("/api/health")` (`:246`); reached over HTTP by the runtime/load-balancer/`checkBackendAvailable`, never called by Python code — Flask/FastAPI decorator dispatch is invisible to a code call-graph. |
+| 5 | `getSurveyReferencedNodes` (`surveyDetector.ts`) | **DELETE** | Genuinely dead, not a dispatch false-positive: `createSurveyDetector` is imported only by its own `.test.ts` (no App/renderer/queryEngine consumer), and nothing reads the `surveyReference` flag it writes — the whole survey-detection module is unwired. |
+
+**Caveat on #5:** This is the only true positive, but it's a *whole-module* deletion, not a one-function trim — clean removal means dropping `surveyDetector.ts` + `surveyDetector.test.ts` and the now-orphan `surveyReference?: boolean` field in `src/types/paper.ts:39`. It appears in `.kiro/specs/.../design.md` (Requirements 14.1–14.3), so confirm the survey feature is *abandoned* rather than *built-but-not-yet-wired* before deleting; if it's planned-unfinished, KEEP and file a ticket to wire the renderer instead.
+
+The static analyzer was right on 1 of 5 — the other four are each reachable through a dispatch mechanism (factory-object method return, interface polymorphism, FastAPI route registration) that a name-based call-graph structurally cannot trace.
+
+<!-- buddy: *guards the four survivors* only the survey module was truly dead — the rest just hide behind dispatch -->

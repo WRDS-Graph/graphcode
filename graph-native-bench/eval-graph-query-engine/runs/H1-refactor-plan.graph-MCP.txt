@@ -1,0 +1,66 @@
+I have a complete, precise picture. Here's the plan.
+
+---
+
+# Refactor Plan: Splitting `src/renderer/graphRenderer.ts` (3302 lines)
+
+## What's actually in the file
+
+**Lines 30–66** — Types & constants: `RenderOptions`, `DEFAULT_RENDER_OPTIONS`, `NodeType`, `GROUP_META`, `ALL_GROUPS`, `MAX_FAN_SIZE`
+**Lines 73–145** — Pure helper functions: `deriveNodeType`, `buildChildrenMap`, `buildEdgeTypeMap`, `formatEdgeType`, `computeImportance`
+**Lines 148–624** — `buildStylesheet()` — one ~475-line pure function returning the Cytoscape stylesheet
+**Lines 630–3302** — `CytoscapeGraphRenderer` — the god-class: 87 methods + 36 instance fields
+
+The class is the real god-object, but it's also the part with shared mutable state (36 `private` fields all interdependent), so it's the *hardest* to split. The free functions above it are low-risk, high-value extractions.
+
+## (1) Production files that depend on it — must keep compiling
+
+| File | What it imports | Update needed |
+|------|----------------|---------------|
+| `src/components/GraphPanel.tsx:10` | `CytoscapeGraphRenderer` (class only) — calls only `renderGraph`, `renderOverlay`, `clearOverlay`, `onNodeClick`, `onNodeDoubleClick`, `destroy` | **None** if the class keeps its name + path |
+| `src/renderer/noveltyClassifier.ts:14` | `deriveNodeType`, `type NodeType` | **Yes** — repoint import to new helpers module |
+| `src/renderer/graphRenderer.test.ts:7-9` | `CytoscapeGraphRenderer`, `deriveNodeType` | **Yes** — repoint `deriveNodeType` import (or have `graphRenderer.ts` re-export it) |
+
+> Only **3** dependents, and `GraphPanel.tsx` (the one production consumer of the class) touches a 6-method surface. That's the safety margin that makes this tractable.
+
+## (2) The seam to split along
+
+**Extract the pure, stateless code out of the class's orbit — do NOT carve up the stateful class yet.** Two target modules, plus a barrel:
+
+```
+src/renderer/
+  graphRenderer.ts          ← keeps CytoscapeGraphRenderer class (stays the import path for GraphPanel)
+  graph/
+    graphTheme.ts           ← GROUP_META, ALL_GROUPS, MAX_FAN_SIZE, buildStylesheet()   (~480 lines, zero state)
+    graphHelpers.ts         ← deriveNodeType, buildChildrenMap, buildEdgeTypeMap,
+                              formatEdgeType, computeImportance, NodeType,
+                              RenderOptions, DEFAULT_RENDER_OPTIONS                       (~110 lines, pure)
+```
+
+Why this seam and not "split the class into ClusterRenderer / OverlayRenderer / DragController":
+- The 87 methods share **36 mutable fields** (`expandedNodes`, `childrenMap`, `cy`, `clusterPage`, …). Cluster methods, overlay methods, and drag methods all read and write the same `this.cy` / `expandedNodes` / `groupedNodes`. Splitting them into separate classes means threading that state through constructors or a shared context object — high risk, large diff, easy to introduce subtle state-desync bugs in zoom/pan or expand/collapse.
+- The free functions (lines 30–624) have **zero `this` references**. `buildStylesheet` alone is ~480 lines of pure config — extracting it removes ~15% of the file with near-zero risk.
+
+This split solves the stated problem (god-object, high fan-in) at the **module** level: `deriveNodeType` is imported by `noveltyClassifier`, so moving it breaks the existing circular import (see risk below). The class fan-in is unchanged because only `GraphPanel` uses it, and via a 6-method surface that needs no restructuring.
+
+## (3) Safe ordering of steps
+
+1. **Snapshot the safety net.** Run `npm test`, `npm run lint`, `npm run build`. Record the green baseline (`graphRenderer.test.ts` is the guard for everything below).
+2. **Create `graph/graphHelpers.ts`.** Move lines 30–145 (types, constants, pure helpers) verbatim. Export each. In `graphRenderer.ts`, `import` them back and **`export` `deriveNodeType` / `NodeType` from the new module** (re-export) so `noveltyClassifier.ts` and the test keep working untouched. Run tests.
+3. **Repoint `noveltyClassifier.ts:14`** to import `deriveNodeType`/`NodeType` directly from `./graph/graphHelpers` — this is the step that **breaks the existing cycle**. Run tests + build.
+4. **Create `graph/graphTheme.ts`.** Move `GROUP_META`, `ALL_GROUPS`, `MAX_FAN_SIZE`, `buildStylesheet` (lines 55–66, 148–624). Import back into `graphRenderer.ts`. Run tests + build (`buildStylesheet` output feeds `cytoscape({ style })` in `renderGraph` — a snapshot-sensitive consumer, so verify the test that renders a graph still passes).
+5. **Repoint the test** (`graphRenderer.test.ts:7-9`) to import `deriveNodeType` from `./graph/graphHelpers`, leaving `CytoscapeGraphRenderer` from `./graphRenderer`. Drop the re-export from step 2 once nothing depends on it. Run tests.
+6. **Smoke-test the UI** per CLAUDE.md §5: `npm run dev`, expand a cluster, render an overlay, drag a root, confirm zoom/pan survives a layout (the non-destructive rule #4). Each is a method that pulls from the extracted theme/helpers.
+7. *(Optional, separate PR — do not bundle)* Only after 1–6 land: consider extracting drag handlers (`beginRootDrag`, `dragRootSide`, `beginGroupDrag`, `dragGroup`, `wireInteractions`) into a controller that takes the renderer as a dependency. This is the one cohesive, lower-coupling cluster of methods — but it still touches `this.cy`/`draggedRoot`/`draggedGroup`, so it's its own reviewed change, not part of this pass.
+
+Per the repo's one-issue→one-PR SOP, steps 1–6 are one PR; step 7 is a follow-up.
+
+## (4) Top risk
+
+**The pre-existing circular import between `graphRenderer.ts` ⇄ `noveltyClassifier.ts`.** Today `graphRenderer.ts:24` imports `classifyAllNodes` from `noveltyClassifier`, and `noveltyClassifier.ts:14` imports `deriveNodeType`/`NodeType` back. Vite/ESM tolerates this now only because of evaluation-order luck. When you move `deriveNodeType` into a new module, you must move it **cleanly to a leaf module** (`graphHelpers.ts` that imports nothing from `graphRenderer` or `noveltyClassifier`) and repoint *both* consumers there (steps 3 + 5). If you instead leave a re-export in `graphRenderer.ts` permanently, you preserve the cycle and risk a `deriveNodeType is undefined`-at-init failure that won't show in unit tests (which import the symbol directly) but **will** surface in the bundled app where module init order differs — i.e., a green `npm test` with a broken `npm run dev`. Mitigation: `graphHelpers.ts` must import only from `../types/*`; verify with `npm run build` (not just `npm test`) after steps 3 and 4, and do the live `npm run dev` smoke test before claiming done.
+
+**Secondary risk:** `buildStylesheet`'s output is consumed by `renderGraph` → `cytoscape({ style })`; a copy-paste slip (the many `as unknown as number` casts on lines 616–620) would silently change node sizing rather than throw. The render-path test in `graphRenderer.test.ts` plus the UI smoke test are the guard.
+
+---
+
+Want me to execute steps 1–6 as a branch + PR following the repo SOP, or stop at the plan?

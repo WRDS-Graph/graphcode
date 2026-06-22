@@ -1,0 +1,42 @@
+I have a complete picture. The audit is conclusive.
+
+## Audit Result: Python Backend Code-Execution / Deserialization Risk
+
+### The single most dangerous sink
+
+**`pickle.load(f)` — `backend/loader.py:112`**
+
+```python
+cache_file = CACHE_DIR / f"{data_hash}_v{CACHE_VERSION}.pkl"   # line 106
+if cache_file.exists():                                        # line 108
+    with cache_file.open("rb") as f:
+        state = pickle.load(f)                                 # line 112  ← SINK
+```
+
+This is the **only** deserialization/code-execution sink in the entire backend. I swept all `.py` files for `eval`, `exec`, `subprocess`, `os.system`, `yaml.load`, `marshal`, `__import__`, `compile`, `torch.load`, etc. — **none exist**. Every other deserialization is `json.loads` (data-only, safe), including the LLM response in `semantic_compare.py:114` and the request-reachable compare cache in `server.py:53`. `pickle.load` is unconditionally arbitrary-code-execution: a crafted `.pkl` runs attacker code via `__reduce__` during load, before the server even finishes booting (`lifespan` → `SearchIndex.load_or_build()`).
+
+### Exploit precondition
+
+The sink is **not directly reachable from an HTTP request**. There is no request parameter that names the file or supplies its bytes — the filename is `md5(papers.json) + "_v6.pkl"`, and the only request-driven file write (`/api/compare` → `shared_nodes_cache.json`) is **JSON, not pickle**. So this is *not* a remotely-triggerable RCE on its own.
+
+Exploitation requires the attacker to **plant a malicious `.pkl` into `backend/.cache/`** (or replace the legitimate one). Realistic vectors, in descending plausibility:
+
+1. **Cache-poisoning via a writable `.cache/` dir.** `.cache/` is gitignored and created at runtime (`mkdir(parents=True)`, line 104). Any other process, shared-volume mount, or lower-privilege user with write access to `backend/.cache/` can drop a `<correct-md5>_v6.pkl`. On next restart it's loaded and executes — a classic local-privilege-escalation / lateral-movement primitive, not internet-facing RCE.
+2. **Supply-chain / build-artifact tampering.** If the `.pkl` is ever produced on a build box and shipped (it's gitignored, so unlikely to be committed, but could be baked into an image or shared cache layer), a compromised build step yields code execution on every consumer.
+3. **No integrity check.** The filename binds only to `papers.json`'s hash, never to the pickle's own contents — there's no HMAC/signature, so a swapped file with the right name is trusted blindly.
+
+The MD5 keying is also weak (collisions/length-extension irrelevant here, but it signals the cache was designed for invalidation, not authentication).
+
+### Severity
+
+**MEDIUM** (CVSS ~5–6, local/adjacent). It is the highest-impact sink in the backend (unbounded RCE on trigger) but is gated behind filesystem-write access to `backend/.cache/` and a server restart — **not** reachable from untrusted network input given the current routes. Treat as **HIGH** only if the deployment puts `.cache/` on a shared/world-writable volume, runs the build under a different trust domain than the server, or ships the `.pkl` as a distributed artifact.
+
+### Remediation (root-cause, not symptom)
+
+- Replace pickle entirely with a non-executing format for the cache (JSON/`np.save`/`scipy.sparse.save_npz` for the matrices and graph; `BM25Okapi` and the `nx.DiGraph` can be reconstructed from JSON-serializable state). This eliminates the sink class outright.
+- If pickle must stay: write the file `0600`, restrict `.cache/` to the server's own uid, and add an **HMAC over the pickle bytes** using a server-held secret, verified before `pickle.load`. Reject on mismatch and rebuild from source.
+- Bind cache validity to a content signature, not just `md5(papers.json)`.
+
+I focused on real reachability rather than flagging the LLM/JSON paths as if they were `eval` sinks — they aren't. The pickle load is the one genuine code-execution primitive, and its honest rating is gated on filesystem trust, not the HTTP surface.
+
+<!-- buddy: *guards the .cache dir* one unsigned pickle is all it takes — found the only real RCE in the whole backend -->

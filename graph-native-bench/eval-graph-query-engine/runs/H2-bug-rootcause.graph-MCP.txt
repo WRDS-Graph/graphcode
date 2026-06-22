@@ -1,0 +1,27 @@
+The diagnosis is complete regardless of which scope you pick, so let me finish the answer. I'll proceed with my recommendation (expand + collapse) as the default; the re-test list below covers all of it. You asked for diagnosis + minimal fix + re-test list, not implementation, so here's the rest.
+
+### UI interactions to re-test after the fix
+
+Because the change touches the shared expand/collapse handlers (`toggleCluster`, `toggleNodeExpansion`) and the camera contract, re-verify each path that calls or depends on `fit()`:
+
+**Must re-test (directly changed paths):**
+1. **Click a cluster to expand** — children fan out; viewport must stay put (the fix target). Verify both a small cluster and a `>MAX_FAN_SIZE` (paginated) cluster.
+2. **Click an expandable child node** — its subtree fans out; viewport unchanged.
+3. **Collapse a cluster / collapse a node** — descendants hide; viewport unchanged (if collapse lines included).
+4. **"+ more" pagination pill** (regression guard) — still must not move the camera; confirm PR #6 behavior intact.
+
+**Must re-test (other `fit` callers / camera-dependent flows that share state):**
+5. **Expand All** — must *still refit* to frame everything (it has its own explicit `fit` at the end of `expandAll`, line ~2682+; confirm it survives).
+6. **Collapse All** — verify final framing is acceptable.
+7. **Shared Only** (overlay mode) — `toggleCluster`'s shared-only branch (line 1060) is one of the touched lines; confirm shared-node reveal still frames correctly and doesn't jump.
+8. **Initial graph render / switching papers** — `renderGraph` (line 853) and the fonts-ready refit (line 802) still fit on first paint — confirm a freshly opened paper is framed, not stuck at a stale zoom.
+9. **Comparison mode** — select a related paper to load an overlay, then expand a canonical cluster: `repositionComparisonGraph` runs but no longer fits (PR #6); confirm the two graphs stay laid out and the camera doesn't jump while paging/expanding.
+10. **Zoom In / Zoom Out / container resize** — the `zoomBy` buttons and the `ResizeObserver → resetView` path are independent of the change; smoke-test that they still work (resize the window / toggle the detail panel width).
+
+**Verification commands (per CLAUDE.md §5):** `npm test` (extend `graphRenderer.test.ts` with a "cluster expand preserves zoom/pan" regression test mirroring the existing Issue #9 "+more" tests at lines 823–940), then `npm run lint`, `npm run build`, then `npm run dev` and walk steps 1–10 against a `sample data/merged_graphs/*` paper with a citation cluster of >12 children.
+
+---
+
+**Summary:** Root cause is the unconditional `cy.fit()` in the *cluster/node expand* handlers (`graphRenderer.ts` lines 1108 and 1379, plus collapse siblings 1075/1312 and shared-only 1060) — the half of Issue #9 that PR #6 explicitly deferred (Alternative C). The "+ more" pill itself is already fixed. Minimal fix: drop those `fit()` calls (the `preset` layout anchors positions, so no refit is needed), leaving `expandAll`/`renderGraph` as the only intentional fitters. The bug is a recurrence of a known, partially-fixed issue, not a new one.
+
+One note before any implementation: per the repo's CLAUDE.md §7, Issue #9 is assigned to Qingyun Zeng and follows a one-issue→one-PR pipeline with a debug report. If you want me to implement, say so and I'll route it through that workflow (update `issue-9-zoom-preservation.md` with a "Round 2" section, branch, add the regression test, and run the verification suite).

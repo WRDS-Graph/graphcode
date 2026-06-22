@@ -1,0 +1,67 @@
+I have everything I need. Here's the concrete, codebase-specific plan.
+
+---
+
+# Refactor Plan: Splitting `src/renderer/graphRenderer.ts`
+
+## Verified facts (corrections to the supplied graph context)
+
+The supplied graph context was **wrong** — it listed only `graphRenderer.ts → graphRenderer.ts (self-ref)`. Actual verified state:
+
+- **File:** 3302 lines / 128 KB. One exported class `CytoscapeGraphRenderer` (lines 630–3302, ~2670 lines, **63 methods, 64 private fields**) + module-level helpers (`deriveNodeType`, `buildStylesheet`, `buildChildrenMap`, `buildEdgeTypeMap`, `formatEdgeType`, `computeImportance`) + the `RenderOptions`/`NodeType` exports.
+- **Already-split precedent:** `noveltyClassifier.ts` (`classifyAllNodes`) is a clean sibling module the class imports — a working model for how a seam looks here.
+
+### (1) Production files that depend on it and need updating
+
+| File | What it imports / uses | Action needed |
+|---|---|---|
+| **`src/components/GraphPanel.tsx`** | `import { CytoscapeGraphRenderer } from '@/renderer/graphRenderer'`; constructs it and calls **14 public methods**: `renderGraph`, `renderOverlay`, `clearOverlay`, `onNodeClick`, `onNodeDoubleClick`, `resetView`, `zoomBy`, `expandAll`, `expandSharedOnly`, `collapseAll`, `destroy` (+ via ref). | **This is the only production dependent.** Must keep `CytoscapeGraphRenderer` and its 14-method public surface importable from the same path. |
+| `src/renderer/noveltyClassifier.ts` | Imported *by* graphRenderer, not the reverse. | No change. |
+
+**Tests that pin the public/test API (the regression net — not "dependents to update," but the safety harness):**
+- `src/renderer/graphRenderer.test.ts` — constructs `new CytoscapeGraphRenderer(...)` ~15×, calls `deriveNodeType` (8×) and `__testonly_getClusterLabels` (4×). **`deriveNodeType` and `__testonly_getClusterLabels` must remain exported/public.**
+- `src/components/GraphPanel.test.tsx`.
+
+### (2) The seam to split along
+
+**Keep `CytoscapeGraphRenderer` as the facade. Extract pure, stateless logic first; extract stateful sub-behaviors as delegated helper classes second.** Do **not** try to split the class into peer classes that share its 64 mutable fields — those fields are the coupling, and slicing through them is where this goes wrong.
+
+The natural seams, by decreasing safety, mapped to actual line ranges:
+
+**Tier A — pure functions (zero `this`, trivially movable). Highest fan-in reuse, lowest risk:**
+- `src/renderer/graph/nodeType.ts` ← `deriveNodeType`, `NodeType`, `GROUP_META`, `ALL_GROUPS`, `MAX_FAN_SIZE`, `computeImportance` (lines 42–146)
+- `src/renderer/graph/graphMaps.ts` ← `buildChildrenMap`, `buildEdgeTypeMap`, `formatEdgeType` (lines 83–127)
+- `src/renderer/graph/stylesheet.ts` ← `buildStylesheet` (lines 148–629 — **~480 lines, the single biggest pure win**)
+- `src/renderer/graph/renderOptions.ts` ← `RenderOptions`, `DEFAULT_RENDER_OPTIONS` (lines 30–41)
+
+**Tier B — cohesive stateful clusters, extracted as delegated modules the facade owns and calls:**
+- `comparison/overlay` cluster (`renderOverlay`, `clearOverlay`, `repositionComparisonGraph`, `realignComparisonRootToCanonical`, `setComparisonLabel`, `isComparisonSideElement`, `sideNodes`, lines ~1159–1961, ~800 lines).
+- `expansion state machine` cluster (`expandNode/collapseNode/expandAll/collapseAll/expandSharedOnly`, `revealSharedNodes`, `hideAllCitationNodes`, shared-group rendering, lines ~2014–2400).
+- `interactions/drag` cluster (`wireInteractions`, `beginRootDrag`, `dragRootSide`, `beginGroupDrag`, `dragGroup`, `resolveOverlaps`, lines ~2493–3302).
+
+Tier B modules take the shared mutable maps via an explicit **render context** (an object holding `cy`, `nodeMap`, `childrenMap`, `expandedNodes`, etc., that the facade owns and passes in) rather than reaching into private fields. This is the real architectural payoff — it makes the implicit field-graph explicit.
+
+### (3) Safe ordering of steps
+
+Each step compiles green and keeps `npm test`/`npm run build` passing before the next.
+
+1. **Establish the harness first.** Run `npm test` + `npm run build` and record the baseline (count of passing tests, build success). Nothing proceeds without this green.
+2. **Create `src/renderer/graph/` dir.** Move Tier A pure functions one module at a time, re-exporting each from `graphRenderer.ts` so **no import path changes anywhere yet**:
+   - `stylesheet.ts` first (biggest, safest, zero state) → then `nodeType.ts` → `graphMaps.ts` → `renderOptions.ts`. Run tests after each.
+3. **Verify `deriveNodeType` is still exported** from `graphRenderer.ts` (re-export) so `graphRenderer.test.ts` is untouched. (Optionally point that test at the new module in a *separate* commit.)
+4. **Introduce the `RenderContext` object** inside the class: bundle the shared maps/sets into one owned object, replacing `this.nodeMap` etc. with `this.ctx.nodeMap` mechanically. This is internal-only; public API unchanged. Test.
+5. **Extract Tier B clusters one at a time**, in this order (least-entangled first): `interactions/drag` → `comparison/overlay` → `expansion`. Each becomes a module/helper taking `RenderContext`; the facade method becomes a one-line delegation. Test + build after each.
+6. **Final pass:** keep `graphRenderer.ts` as the thin facade (constructor, the 14 public methods, `__testonly_getClusterLabels`, re-exports). Confirm `GraphPanel.tsx` and both test files are byte-identical / untouched.
+7. Run full gate: `npm test`, `npm run lint`, `npm run build`, then `npm run dev` smoke test (render a graph, expand/collapse, overlay, reset/zoom — the 14 methods GraphPanel drives).
+
+### (4) Top risk
+
+**The 64 mutable private fields are a hidden shared-state graph; the comparison-overlay and expansion clusters read/write overlapping maps (`nodeMap`, `childrenMap`, `expandedNodes`, `overlayElementIds`, `expandedClusters`, the `comp*` mirrors).** Extracting a stateful cluster into a separate object risks **silently splitting that shared state into two divergent copies** — the facade mutates its `expandedNodes` while the extracted module mutates a stale one, producing graphs that look right on first render but desync on the *second* expand/overlay interaction. Unit tests that do one render won't catch it.
+
+**Mitigations baked into the plan:** (a) Tier A (pure, no shared state) ships first and is most of the line-count win with near-zero risk; (b) the `RenderContext` object (step 4) makes shared state a single owned reference passed by identity, so extracted modules mutate *the same* maps, not copies; (c) the smoke test in step 7 must exercise **sequential** interactions (expand → overlay → expand again → reset), plus the Cytoscape zoom/pan preservation rule from `CLAUDE.md §6.4`, which `resolveOverlaps`/drag/layout can break.
+
+---
+
+Want me to execute this (start with the Tier A `stylesheet.ts` extraction behind a re-export and run the test gate), or hand it to the `implementer` agent per the repo SOP?
+
+<!-- buddy: *guards the 64 private fields* that shared-state desync is the trap here, not the line count -->

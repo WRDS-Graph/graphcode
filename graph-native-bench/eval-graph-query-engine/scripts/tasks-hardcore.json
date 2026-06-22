@@ -1,0 +1,78 @@
+{
+  "_comment": "Hardcore tasks where the deliverable is reasoning/work, graded by an LLM judge on per-task rubrics. 'anchor' seeds the graph-native ranked preamble. 'rubric' = 4 weighted 0-10 criteria the blind judge applies.",
+  "budgetTopK": 15,
+  "tasks": [
+    {
+      "id": "H1-refactor-plan",
+      "kind": "refactor-plan",
+      "anchor": "graphRenderer",
+      "prompt": "The file src/renderer/graphRenderer.ts is a god-object (high fan-in). Produce a concrete step-by-step plan to split it into smaller modules. Your plan MUST: (1) name the production files that depend on it and would need updating, (2) propose a specific seam to split along, (3) give a safe ordering of steps, (4) call out the top risk. Be specific to THIS codebase, not generic.",
+      "rubric": [
+        {"name": "dependent_accuracy", "weight": 3, "desc": "Are the named dependent files real and reasonably complete (not hallucinated, not missing the obvious ones)?"},
+        {"name": "seam_quality", "weight": 3, "desc": "Is the proposed split seam concrete and sensible for a renderer module (e.g. separates layout/style/expansion)?"},
+        {"name": "ordering_safety", "weight": 2, "desc": "Is the step ordering safe (dependencies updated before/after consistently, tests in the loop)?"},
+        {"name": "specificity", "weight": 2, "desc": "Is it specific to this repo (real symbol/file names) vs generic boilerplate advice?"}
+      ]
+    },
+    {
+      "id": "H2-bug-rootcause",
+      "kind": "bug-diagnosis",
+      "anchor": "CytoscapeGraphRenderer",
+      "prompt": "Open issue: clicking '+ more nodes' to expand the graph resets the zoom/viewport (the user loses their place). Diagnose the ROOT CAUSE (which code, which mechanism), propose the MINIMAL fix, and list which other UI interactions must be re-tested after the fix. Be specific to this codebase's renderer + GraphPanel.",
+      "rubric": [
+        {"name": "root_cause_correct", "weight": 4, "desc": "Does it correctly identify that a cytoscape re-layout after node expansion resets viewport, and where (graphRenderer expansion / GraphPanel resetView)?"},
+        {"name": "fix_minimal_correct", "weight": 3, "desc": "Is the proposed fix the right minimal one (capture cy.zoom()/cy.pan() before mutation, restore after)?"},
+        {"name": "retest_surface", "weight": 2, "desc": "Does it name the right re-test surface (overlay, expand/collapse, resize/ResizeObserver)?"},
+        {"name": "specificity", "weight": 1, "desc": "Specific to real files/symbols vs generic."}
+      ]
+    },
+    {
+      "id": "H3-deadcode-safety",
+      "kind": "dead-code-judgement",
+      "anchor": null,
+      "prompt": "A static analyzer flagged these 5 symbols as 'uncalled' (dead code) in this repo: (1) matchAndRank in src/matching/graphMatchingEngine.ts, (2) computeOverlay in src/matching/graphMatchingEngine.ts, (3) analyzeQuery in src/llm/llmClient.ts, (4) health in backend/server.py, (5) getSurveyReferencedNodes in src/matching/surveyDetector.ts. For EACH, decide DELETE or KEEP and justify in one line. Beware dynamic dispatch (React useCallback/prop-passing, Flask @app.route) that a call-graph misses.",
+      "rubric": [
+        {"name": "dispatch_awareness", "weight": 4, "desc": "Does it correctly KEEP the dispatch-reachable ones (matchAndRank/computeOverlay via App closures, analyzeQuery, health via @app.route) rather than deleting them?"},
+        {"name": "evidence", "weight": 3, "desc": "Does it cite actual usage evidence (a caller, a prop, a route decorator) rather than guessing?"},
+        {"name": "calibration", "weight": 2, "desc": "Is it appropriately cautious — does it avoid recommending a delete it cannot prove is safe?"},
+        {"name": "specificity", "weight": 1, "desc": "Per-symbol specific reasoning vs blanket answer."}
+      ]
+    },
+    {
+      "id": "H4-dataflow-explain",
+      "kind": "data-flow-explanation",
+      "anchor": "search",
+      "prompt": "Explain, hop by hop, how a user's search query becomes a ranked list of related papers in this app — from the frontend search entry through the query engine, the (optional) backend /api/search hybrid retrieval (BM25 + vector + graph PPR + RRF fusion), to the final ranked papers shown. Name the real functions/files at each hop.",
+      "rubric": [
+        {"name": "hop_completeness", "weight": 3, "desc": "Does it cover the real pipeline (queryEngine.search -> hybridRelatedSearch -> bm25/vector/graphPath -> rrf_fuse -> matchAndRank)?"},
+        {"name": "accuracy", "weight": 3, "desc": "Are the named functions/files real and in the right order (no invented hops)?"},
+        {"name": "cross_tier", "weight": 2, "desc": "Does it correctly handle the frontend<->backend boundary and the backend-optional fallback?"},
+        {"name": "clarity", "weight": 2, "desc": "Is the explanation followable as an ordered trace?"}
+      ]
+    },
+    {
+      "id": "H5-security-audit",
+      "kind": "security-audit",
+      "anchor": null,
+      "prompt": "Audit this repo's Python backend for the single most dangerous code-execution/deserialization risk reachable from untrusted or semi-trusted input. Identify the sink (file:line), explain the exploit precondition, and rate severity. Focus on real reachable sinks, not theoretical ones.",
+      "rubric": [
+        {"name": "finds_pickle", "weight": 4, "desc": "Does it identify the pickle.load in backend/loader.py (~line 112) as the key deserialization/RCE sink?"},
+        {"name": "precondition", "weight": 3, "desc": "Does it correctly reason about the exploit precondition (attacker-writable cache file the pickle is loaded from)?"},
+        {"name": "severity_calibration", "weight": 2, "desc": "Is the severity rating reasonable and justified (high IF cache is untrusted, lower if fully local)?"},
+        {"name": "no_hallucination", "weight": 1, "desc": "Does it avoid inventing sinks that aren't in the code?"}
+      ]
+    },
+    {
+      "id": "H6-api-migration",
+      "kind": "api-migration",
+      "anchor": "loadPaperGraph",
+      "prompt": "We are changing the signature of loadPaperGraph (in src/data/dataLayer.ts) to take an options object instead of positional args. List EVERY call site that must be updated, and for each, describe the exact edit. Do not miss indirect callers.",
+      "rubric": [
+        {"name": "callsite_completeness", "weight": 4, "desc": "Does it find the real call sites (preloadPaperGraphs and the App.tsx handlers that call it), including indirect ones?"},
+        {"name": "edit_correctness", "weight": 3, "desc": "Is the described per-site edit correct (positional -> options object)?"},
+        {"name": "no_false_sites", "weight": 2, "desc": "Does it avoid listing call sites that don't exist?"},
+        {"name": "specificity", "weight": 1, "desc": "Real file:symbol references."}
+      ]
+    }
+  ]
+}

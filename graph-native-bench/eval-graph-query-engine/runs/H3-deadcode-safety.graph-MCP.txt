@@ -1,0 +1,17 @@
+Evidence complete. No renderer or graph-styling code reads `surveyReference` — the flag is written by `getSurveyReferencedNodes` and asserted only by its own test. The feature is dead end-to-end.
+
+## Verdict — DELETE vs KEEP for all 5
+
+| # | Symbol | Verdict | One-line justification |
+|---|--------|---------|------------------------|
+| 1 | `matchAndRank` (`graphMatchingEngine.ts`) | **KEEP** | Returned as a method of the `GraphMatchingEngine` object (line 743); the live app creates the engine via `createGraphMatchingEngine` in `App.tsx:149/627`. Call-graph misses it because it's invoked through the object property, not by bare name. |
+| 2 | `computeOverlay` (`graphMatchingEngine.ts`) | **KEEP** | Same factory-method dispatch — actually called in production at `App.tsx:442` (`gme.computeOverlay(...)`) on the related-paper → comparison-overlay path, plus 16 tests. |
+| 3 | `analyzeQuery` (`llmClient.ts`) | **KEEP** | `LLMClient` interface method invoked polymorphically at `queryEngine.ts:1060` and `:1083` (`llmClient.analyzeQuery(rawInput)`); the call-graph can't resolve the interface dispatch through the factory-returned client. |
+| 4 | `health` (`backend/server.py`) | **KEEP** | Registered as `GET /api/health` via the `@app.get` decorator (line 246); invoked by FastAPI's router at request time and hit by `backendSearch.ts:102` and `scripts/eval_prior_art.py:336`. Never called by name in Python — pure framework dispatch. |
+| 5 | `getSurveyReferencedNodes` (`surveyDetector.ts`) | **DELETE** | Genuinely dead: `createSurveyDetector` is **never instantiated in production** (only its own test), and nothing reads the `surveyReference` flag it writes — no renderer, no styling, no query path. The whole survey-detection module is unwired. |
+
+**Bottom line:** The static analyzer's "uncalled" flag was a false positive on 4 of 5 — each is reached through a dispatch mechanism (object-method return, interface polymorphism, or FastAPI route registration) that a name-based call-graph can't follow. Only `getSurveyReferencedNodes` is truly dead.
+
+A few notes if you act on this:
+- For #5, deleting cleanly means removing the whole `surveyDetector.ts` module + `surveyDetector.test.ts`, and likely the now-orphan `surveyReference?: boolean` field in `src/types/paper.ts` (line 39) — it has no other consumer. Worth a quick check of whether the survey feature is *planned* (it appears in `.kiro/specs/.../design.md`) before deleting, in case it's intended-but-unfinished rather than abandoned.
+- I did not delete anything — this is analysis only. Want me to remove the dead survey-detection code and re-run `npm test` / `npm run build` to confirm nothing breaks?

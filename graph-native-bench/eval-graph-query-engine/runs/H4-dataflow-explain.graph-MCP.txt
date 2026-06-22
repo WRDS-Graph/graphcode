@@ -1,0 +1,133 @@
+I now have every hop confirmed with real function and file names. Here's the complete trace.
+
+---
+
+# How a search query becomes a ranked list of related papers
+
+The app runs in two modes that share the same shape of result. The **frontend** (`src/`) has a complete local query engine; the **Python backend** (`backend/`) is an optional accelerator that the frontend tries first and falls back from. I'll trace the primary path (backend up) and note the local fallback at each branch.
+
+---
+
+## Hop 1 — Search bar entry (frontend UI)
+
+**`SearchEntryPage`** — `src/components/SearchEntryPage.tsx:64`
+
+The user types into the `<textarea>` (`handleInputChange`, line 149). On Enter or the Search button, **`handleSubmit`** (line 173) validates non-empty input and calls the `onSearch(query.trim())` prop (line 188). Typeahead is a separate debounced path (`triggerTypeahead` → `onTypeahead`).
+
+The `onSearch` prop is wired in **`App.tsx:668`** to **`handleSearch`** (`src/App.tsx:208`, a `useCallback`).
+
+```
+SearchEntryPage.handleSubmit  →  onSearch  ≡  App.handleSearch
+```
+
+## Hop 2 — App orchestration
+
+**`App.handleSearch`** — `src/App.tsx:208`
+
+It calls **`qe.search(query)`** (line 215) where `qe` is the query engine, then dispatches the result into the reducer:
+
+```
+dispatch({ type: "SET_SEARCH_RESULTS", payload: { query, results } })   // App.tsx:238 / :253
+```
+
+(It also kicks off async prior-art fetching via `fetchPriorArtFromBackend` when a high-confidence canonical is found — a separate endpoint, not the hybrid path.)
+
+## Hop 3 — Query engine (the router)
+
+**`createQueryEngine(...).search`** — `src/query/queryEngine.ts:1032`
+
+This is the brain. Order of operations:
+
+1. Empty-input guard (line 1034).
+2. `PRIOR_ART_PRECHECK` regex — prior-art queries skip the backend and go local (line 1047).
+3. **Backend-first:** `checkBackendAvailable()` (line 1051) → if up, `searchViaBackend(queryForBackend)` (line 1069). Long pasted paragraphs are first reduced to entities via `llmClient.analyzeQuery` so the backend label-scan stays compact (lines 1057–1068).
+4. **Local fallback** (backend down or returned null): `classifyInput` → `normalize` → branch by intent/type: `searchByTitle`, `searchCompare`, or **`searchByTechnique`** (line 1109, the local hybrid pipeline that mirrors the backend via `src/retrieval/hybrid.ts`).
+
+## Hop 4 — Backend client (frontend → HTTP)
+
+**`searchViaBackend`** — `src/api/backendSearch.ts:110`
+
+`POST {BACKEND_URL}/api/search` with `{ query }`, 30s timeout. On success it runs **`normalizeSearchResult`** (line 63) to coerce the backend JSON into the frontend `SearchResult` shape (`canonicalCandidates`, `relatedPapers`, `queryDecomposition`, `appliedFilters`). On any failure it returns `null` → engine falls through to the local path.
+
+---
+
+### → Crossing into the Python backend
+
+## Hop 5 — `/api/search` endpoint
+
+**`search(req)`** — `backend/server.py:574`
+
+1. Guards on `index` readiness (503 if not).
+2. **`classify(raw, index.papers)`** (line 583, from `backend/search/processor.py:179`) → `NormalizedQuery` (input_type, cleaned, intent, year constraints).
+3. **Canonical resolution** (lines 589–708):
+   - Title match → direct canonical (line 589).
+   - Otherwise a 4-pass scorer builds `best_by_slug`: **Pass 1** node-label scoring (`score_label_match`), **Pass 2** strict title substring, **Pass 3** **BM25** over node labels + explanations (`index.bm25.get_scores`, scaled into [0.40, 0.80]), **Pass 4** title-token tie-break bonus. Top result becomes `canonical_slug`.
+   - If no canonical resolves, it returns candidates with empty `relatedPapers` (line 710).
+
+## Hop 6 — Three retrieval paths in parallel
+
+`backend/server.py:726-737` — a `ThreadPoolExecutor(max_workers=3)` runs:
+
+- **BM25 path** — **`run_bm25_path(canonical_slug, index)`** — `backend/search/bm25_path.py:47`
+- **Vector path** — **`run_vector_path(canonical_slug, index)`** — `backend/search/vector_path.py:66`. Batch cosine of the canonical's method/use_case node vectors against all node vectors (`all_vecs @ canon_vecs.T`, GPU via `_gpu_batch_cosine` when available), gated at `COSINE_THRESHOLD = 0.40`, scored `sim × edge_weight × domain_discount`, aggregated per paper.
+- **Graph PPR path** — **`run_graph_path(canonical_slug, index, intent, bm25_results)`** — `backend/search/graph_path.py:89`. Seeds a personalized-PageRank vector on the canonical node (seed mix depends on intent — `compare`/`prior-art` blend extra seeds), runs power iteration in **`GraphPPRIndex.ppr`** (`graph_path.py:59`) over the pre-built row-normalized transition matrix `P` (`graph_path.py:27`/`build_ppr_index:81`), then aggregates PPR mass per paper and records the bridging node.
+
+Note the BM25 result is fed into the graph path as seeds for the `prior-art` intent (`server.py:733-736`).
+
+## Hop 7 — RRF fusion + gating
+
+**`rrf_fuse(bm25_results, vector_results, graph_results)`** — `backend/search/hybrid.py:21`
+
+- Reciprocal-rank-fusion: each path contributes `1/(RRF_K + rank + 1)` per slug (`_rrf_score`, `RRF_K = 60`), merging sources, method pairs, citation flags, graph bridges, vector scores.
+- **Post-gate** (lines 73–81): a paper is admitted only if it has a strong signal — shared method pairs, a citation, a graph edge, raw cosine ≥ 0.40, or appearing in ≥2 paths.
+- **Citation boost** (line 86): direct citations get `+0.040` so they outrank generic-vocabulary matches.
+- Sorts by `rrf_score`, truncates to `MAX_RESULTS = 50`.
+
+*(The frontend local equivalent is `reciprocalRankFusion` in `src/retrieval/rrf.ts:15`, called by `src/retrieval/hybrid.ts`.)*
+
+## Hop 8 — Build the ranked papers + year bounds
+
+**`build_ranked_papers(fused, papers_by_slug)`** — `backend/search/hybrid.py:95`
+
+Joins each fused slug back to its full paper object, dedups shared method pairs, synthesizes a `relationshipDescription` ("Shares methods…", "Directly cited", "Connected via…", or "Semantically related"), and packages `{ paper, score, retrievalSources, sharedMethodPairs, graphBridges, bestVectorMatch }`.
+
+Back in **`search()`** (`server.py:744-765`), two filters apply: explicit query year constraints (`year_before`/`year_after`), then an **always-on prior-art bound** — related papers must have `0 < year <= canonical_year`. The response returns `{ canonicalCandidates, relatedPapers, queryDecomposition, appliedFilters }`.
+
+---
+
+### → Back to the frontend
+
+## Hop 9 — State
+
+The JSON returns through `searchViaBackend` → `normalizeSearchResult` → `qe.search` → `App.handleSearch`, which dispatches **`SET_SEARCH_RESULTS`** into **`appReducer`** (`src/state/appState.tsx:118`). `state.searchResults.relatedPapers` is now populated (and `App.tsx:191` preloads the related papers' graphs).
+
+## Hop 10 — Render the ranked list
+
+**`LeftPanel`** — `src/components/LeftPanel.tsx:81` (rendered by `App`)
+
+It receives `relatedPapers` as a prop, filters by title (`filterByTitle`, line 351), paginates (`INITIAL_COUNT = 3`, then `LOAD_MORE_SIZE = 10`), and renders the lower section as **`RelatedPapersSection`** (line 330) — each item a **`RelatedPaperEntry`** (`src/components/LeftPanel.tsx:712`). Once a canonical is confirmed in prior-art mode, the lower section swaps to `PriorArtSection` instead.
+
+---
+
+## One-line summary of the path
+
+```
+SearchEntryPage.handleSubmit (SearchEntryPage.tsx:173)
+  → App.handleSearch (App.tsx:208)
+    → queryEngine.search (queryEngine.ts:1032)        ← router: backend-first, else local
+      → searchViaBackend  (backendSearch.ts:110)  ──HTTP POST /api/search──►
+        → server.search (server.py:574)
+          → classify (processor.py:179)  → resolve canonical (BM25 + title passes)
+          → run_bm25_path / run_vector_path / run_graph_path (parallel)
+            (bm25_path.py:47 / vector_path.py:66 / graph_path.py:89 → GraphPPRIndex.ppr)
+          → rrf_fuse (hybrid.py:21)        ← RRF + post-gate + citation boost
+          → build_ranked_papers (hybrid.py:95) + year-bound filter
+      ◄──── SearchResult JSON ────
+    → normalizeSearchResult (backendSearch.ts:63)
+  → dispatch SET_SEARCH_RESULTS → appReducer (appState.tsx:118)
+→ LeftPanel (LeftPanel.tsx:81) → RelatedPapersSection → RelatedPaperEntry
+```
+
+**Two things worth flagging:**
+- The "query engine" is genuinely a *router*, not the ranker — at 10k-paper scale it delegates ranking to the Python backend and only falls back to its own `src/retrieval/hybrid.ts` pipeline when the backend is unavailable or the query is prior-art.
+- BM25 appears **twice** on the backend: once in canonical resolution (Pass 3, `server.py:634`) and again as a fused retrieval path (`run_bm25_path`) whose output also seeds the graph PPR for prior-art intent.

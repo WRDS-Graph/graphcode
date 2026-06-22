@@ -1,0 +1,59 @@
+I now have a complete picture. Let me do one final confirmation: verify the `pkl` cache filename uses an MD5 hash (collision-cheap, attacker-predictable) and that no integrity check (HMAC/signature) exists on the pickle before loading. I've confirmed this from `loader.py:104-115`. Let me also confirm the BM25 object and the data-flow path that necessitates pickle (rather than JSON), which establishes whether the design *requires* an unsafe deserializer.
+
+The audit is complete. Here is my finding.
+
+---
+
+# Backend Security Audit — Code-Execution / Deserialization Risk
+
+## Single most dangerous sink
+
+**Unauthenticated `pickle.load()` of a filesystem-resident cache.**
+
+**Sink:** `backend/loader.py:112`
+```python
+with cache_file.open("rb") as f:
+    state = pickle.load(f)        # ← arbitrary code execution on deserialization
+```
+Written (the matching trust-boundary write) at `backend/loader.py:120-121`:
+```python
+with cache_file.open("wb") as f:
+    pickle.dump(idx._to_state(), f, protocol=5)
+```
+
+## Why this is the one that matters
+
+`pickle.load` is a true code-execution primitive — a crafted pickle runs arbitrary Python via `__reduce__`/`GLOBAL`+`REDUCE` opcodes the instant it is deserialized, before any of your code inspects the data. Of every sink in this backend, it's the only one whose mere *parsing* of input yields RCE.
+
+I checked the alternatives and ruled them out as the top risk:
+- **`semantic_compare.py` (GPT output → `json.loads`)** — LLM/untrusted text, but it lands in `json.loads` and then plain dicts returned as JSON. No `eval`, no template, no shell. Not a code-exec sink.
+- **`json.loads` everywhere else** (`loader.py`, `server.py:53`, `warm_compare_cache.py`, scripts) — JSON can't execute code. Worst case is a malformed-data crash.
+- **No `eval` / `exec` / `os.system` / `subprocess` / `yaml.load` / `torch.load` / `np.load`** anywhere in the backend. Grep across all `*.py` is clean.
+
+So the realistic attack surface for *deserialization/code-execution* collapses to this single pickle load.
+
+## Exploit precondition (honest reachability assessment)
+
+This is a **local / second-order** sink, **not** reachable directly from an HTTP request. It fires once, at server startup, inside `lifespan` → `SearchIndex.load_or_build()` (`server.py:75`). To exploit it an attacker must **plant a malicious `.pkl` in `backend/.cache/`** that the loader will select. Concretely:
+
+1. **Cache dir is git-ignored and unmanaged** (`.gitignore`: `backend/.cache/`) — it's created at runtime (`loader.py:104`) and currently doesn't even exist on this machine. Nothing validates, signs, or owns its contents.
+2. **The filename is predictable and forgeable.** The loader looks for `f"{data_hash}_v{CACHE_VERSION}.pkl"` where `data_hash = md5(papers.json)` (`loader.py:38-39, 105-106`). MD5 of a public data file plus a hard-coded `CACHE_VERSION = 6` — an attacker who can read the repo can compute the exact expected filename. There is **no HMAC, no signature, no integrity check** before `pickle.load` (`loader.py:108-112`).
+3. **Anyone who can write a file into `backend/.cache/` achieves RCE on next restart.** Plausible vectors: a shared/multi-tenant host, a CI or container layer that restores a cached `backend/.cache/` between runs, a teammate syncing a "warm cache" artifact, a compromised dependency or any other path-traversal/file-write bug elsewhere that lands a byte stream on disk. The compare-cache write at `server.py:65` (`shared_nodes_cache.json`) shows the server already treats `.cache/` as a writable scratch dir, reinforcing that the directory is a soft target.
+
+**Honest caveat on "reachable from untrusted input":** no public HTTP route deserializes attacker bytes with pickle — the request handlers all use `json`. This is a **trust-boundary-on-the-filesystem** RCE (a poisoned-cache / supply-chain-style sink), not a remote-from-the-internet one. That is exactly why it's "semi-trusted input": the cache file is implicitly trusted but never actually verified.
+
+## Severity
+
+**HIGH** (CVSS ~7.0–7.8, `AV:L/Privilege-to-write-cache/C:H/I:H/A:H`).
+
+- **Impact if triggered:** full arbitrary code execution as the server process — the worst outcome possible.
+- **Why not CRITICAL:** it is not directly reachable from an unauthenticated network request; it requires the attacker to first obtain a file-write into `backend/.cache/`. The precondition lowers likelihood from "remote, unauthenticated" to "local/second-order," which caps it below the GAN-style remote-RCE tier.
+
+## Fix direction (root-cause, per repo rules)
+
+The `_to_state()` blob is mostly JSON-serializable; the genuinely non-JSON members are `bm25` (`BM25Okapi`), `nx_graph` (`nx.DiGraph`), `all_vecs` (numpy), and `ppr_index`. So a clean permanent fix is to **stop using pickle as the on-disk format**:
+
+- Persist arrays with `np.save`/`.npz`, the graph via `nx.node_link_data` → JSON, and rebuild/re-fit `BM25Okapi` from the already-cached token docs at load — eliminating the deserializer entirely.
+- If pickle must stay short-term, **HMAC-sign the cache** (`hmac.new(secret, blob).hexdigest()` written alongside, verified before `pickle.load`), restrict `backend/.cache/` to `0700`, and replace MD5 with SHA-256 for the cache key. The signed-blob check is the minimum that closes the RCE; replacing the format is the durable fix.
+
+<!-- buddy: *ears perk* found a pickle.load with no signature guarding the gate — classic trojan-cache setup -->

@@ -1,0 +1,35 @@
+The question wasn't answered — I'll proceed by giving you the complete diagnosis for **both** interpretations, including the minimal fix and the re-test list, so you can act either way without a round-trip.
+
+## Minimal fix
+
+**Case A — the "+ more" pill (literal report):** No code change. It's fixed (`pageCluster`/`pageCompCluster`/`repositionComparisonGraph` are `fit`-free) and guarded by 4 passing regression tests. If it still misbehaves in your running app, the deployed build predates PR #6 (`5b631e0` + `62a6f24`) — rebuild/redeploy and re-verify; don't patch source.
+
+**Case B — expanding a cluster/node (the live gap):** Preserve the viewport on *incremental* expansion exactly as the pill fix did. The minimal, lowest-risk change is a capture/restore wrapper around the expansion `fit()`s, or — matching the pattern already chosen in this codebase — drop the `fit()` from the incremental expanders and keep it only on the explicit "Expand All" button.
+
+Minimal diff (preferred, consistent with PR #6's approach):
+- `toggleCluster` (`graphRenderer.ts:1044`) — remove the 3 `cy.fit(...)` calls (1060, 1075, 1108).
+- `toggleNodeExpansion` (`:1299`) — remove the 2 `cy.fit(...)` calls (1312, 1379).
+- `toggleCompCluster` (`:1534`) / `toggleCompNodeExpansion` (`:1484`) — remove their `cy.fit(...)` calls for parity.
+- Leave `expandAll` (`:2670`, fits at `:2777`), `collapseAll`, `expandSharedOnly`, and `resetView` **as-is** — those are explicit "reframe everything" actions where a refit is the expected behavior.
+
+Rationale: children fan out at a fixed radius from a *visible* anchor (the tapped cluster/node), so the user's current zoom remains valid; the `fit()` is gratuitous, identical to the pill case. (If you'd rather guarantee new nodes are never off-screen, use the capture/restore variant instead — but that's strictly more code for the same perceived behavior.)
+
+## Interactions to re-test after a Case-B fix
+
+Anything that calls a now-changed expander, plus the viewport-management surface:
+
+1. **First-time cluster expand** (each of the 4 groups) — children appear, zoom unchanged, no nodes clipped at default fit.
+2. **Node subtree expand/collapse** — multi-level expand keeps zoom; collapse doesn't jump.
+3. **"+ more" pagination** — still preserved (unchanged path, but re-run its 4 tests since they share `repositionComparisonGraph`).
+4. **Expand All / Collapse All** — must *still* refit (the one place fit is intentional; verify `expandAll`'s explicit `fit` survives).
+5. **Shared Only** (`expandSharedOnly`) — overlay-only mode still refits correctly.
+6. **Reset View** + **Zoom In/Zoom Out** buttons (`GraphPanel.tsx:111,119`) — manual zoom controls and `resetView` unaffected.
+7. **ResizeObserver path** — `GraphPanel.tsx:51-54` calls `resetView()` on container resize; resize the panel and confirm it *still* refits (this is a separate, desired refit; the fix must not suppress it).
+8. **Comparison/overlay mode** — expand a canonical cluster *with* a prior-art overlay active; confirm `repositionComparisonGraph` still positions the comparison graph left of canonical without a zoom jump.
+9. **Drag** a cluster/expanded parent (`grab`/`drag`/`free`) — group-drag still moves children together; no refit on drag.
+
+Sibling test files to re-run: `src/renderer/graphRenderer.test.ts` and `src/components/GraphPanel.test.tsx` (per CLAUDE.md §6.5), plus add a new test mirroring the Issue #9 pattern — zoom in, tap a cluster, assert `cy.zoom()`/`cy.pan()` preserved.
+
+**Summary:** The reported bug (the "+ more" pill) is already fixed and verified on `main` — 4 regression tests pass. The only place a "reveal more nodes" click still resets manual zoom is **first-time cluster/node expansion** (`toggleCluster`/`toggleNodeExpansion`), which PR #6 explicitly deferred. If that's what you're seeing, the minimal fix is to drop their `fit()` calls (keeping it on the explicit Expand All), and re-test the 9 interactions above.
+
+<!-- buddy: *guards the viewport* the pill bug was already slain in PR #6 — the cluster-expand fit() still lurks -->

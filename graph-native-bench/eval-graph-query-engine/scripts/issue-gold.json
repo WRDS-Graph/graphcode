@@ -1,0 +1,55 @@
+{
+  "_comment": "Gold localization sets per issue, lifted verbatim from .claude/graph/CODE_GRAPH.md section 7 (the repo maintainers' own human-curated issue-to-file index). 'gold' = primary files an expert says the fix touches. 'anchor' = a representative symbol/type to seed the graph query. This is the benchmark gold for 'did graph localization find the right files'.",
+  "issues": [
+    {
+      "id": 2,
+      "slug": "prior-art-canonical",
+      "anchor": "fetchPriorArtFromBackend",
+      "anchorNote": "handleConfirmCanonical is a useCallback closure inside App() and is not indexed as a top-level symbol; using its distinctive call fetchPriorArtFromBackend as the resolvable proxy anchor (same code path).",
+      "gold": ["src/App.tsx", "src/components/LeftPanel.tsx", "backend/search/processor.py", "backend/server.py"]
+    },
+    {
+      "id": 3,
+      "slug": "out-of-db-related",
+      "anchor": "build_ranked_papers",
+      "gold": ["backend/search/hybrid.py", "src/components/LeftPanel.tsx", "src/data/dataLayer.ts", "src/matching/crossPaperResolver.ts"]
+    },
+    {
+      "id": 4,
+      "slug": "concept-search-quality",
+      "anchor": "matchAndRank",
+      "gold": ["backend/search/processor.py", "backend/search/bm25_path.py", "backend/search/vector_path.py", "src/query/classifier.ts", "src/matching/graphMatchingEngine.ts", "src/matching/nodeMatcher.ts"]
+    },
+    {
+      "id": 5,
+      "slug": "related-pagination",
+      "anchor": "LeftPanel",
+      "gold": ["src/components/LeftPanel.tsx", "src/state/appState.tsx", "backend/search/hybrid.py"]
+    },
+    {
+      "id": 6,
+      "slug": "matching-vs-matching-compare",
+      "anchor": "computeOverlay",
+      "gold": ["src/state/appState.tsx", "src/components/LeftPanel.tsx", "src/App.tsx", "src/matching/graphMatchingEngine.ts"]
+    },
+    {
+      "id": 7,
+      "slug": "comparison-loading",
+      "anchor": "fetchSemanticCompare",
+      "anchorNote": "handleSelectComparison is a useCallback closure inside App() and is not indexed as a top-level symbol; using its distinctive call fetchSemanticCompare as the resolvable proxy anchor (same code path).",
+      "gold": ["src/App.tsx", "src/components/GraphPanel.tsx", "src/state/appState.tsx"]
+    },
+    {
+      "id": 8,
+      "slug": "comparison-summary",
+      "anchor": "DetailPanel",
+      "gold": ["src/components/DetailPanel.tsx", "src/matching/graphMatchingEngine.ts", "src/renderer/graphRenderer.ts"]
+    },
+    {
+      "id": 9,
+      "slug": "zoom-preservation",
+      "anchor": "CytoscapeGraphRenderer",
+      "gold": ["src/renderer/graphRenderer.ts", "src/components/GraphPanel.tsx"]
+    }
+  ]
+}

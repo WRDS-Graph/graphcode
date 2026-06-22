@@ -1,0 +1,68 @@
+{
+  "_comment": "Task set for the 3-harness benchmark. Each task family targets a distinct graph projection. Gold is defined STRUCTURALLY (computed from the live graph) so it is reproducible and not hand-curated, EXCEPT the issue-localization tasks which reuse CODE_GRAPH §7 human gold. 'goldMode' tells the oracle how to derive gold.",
+  "tasks": [
+    {
+      "id": "T1-impact-PaperGraph",
+      "family": "impact",
+      "anchor": "PaperGraph",
+      "projection": "reference-graph",
+      "goldMode": "production-dependents",
+      "note": "Firehose hub (59 files, 52 test). Gold = production (non-test) files in the blast radius. Tests RANKING under test pollution."
+    },
+    {
+      "id": "T1-impact-appState",
+      "family": "impact",
+      "anchor": "appState",
+      "projection": "reference-graph",
+      "goldMode": "production-dependents",
+      "note": "State module — medium fan."
+    },
+    {
+      "id": "T2-callers-createDataLayer",
+      "family": "caller-enumeration",
+      "anchor": "createDataLayer",
+      "projection": "call-graph",
+      "goldMode": "direct-callers",
+      "note": "Distinctive name, real caller set. Gold = files with a direct call edge."
+    },
+    {
+      "id": "T2-callers-renderGraph",
+      "family": "caller-enumeration",
+      "anchor": "renderGraph",
+      "projection": "call-graph",
+      "goldMode": "direct-callers"
+    },
+    {
+      "id": "T3-flow-search",
+      "family": "data-flow",
+      "anchor": "search",
+      "projection": "call-import-forward",
+      "goldMode": "forward-closure",
+      "note": "queryEngine.search — deep forward reach. Gold = files in the forward call closure (depth 3)."
+    },
+    {
+      "id": "T4-deadcode-global",
+      "family": "dead-code",
+      "anchor": null,
+      "projection": "reference-graph-zero-indegree",
+      "goldMode": "zero-reference-symbols",
+      "note": "Whole-repo: gold = symbols with no edge AND no name-reference (after dispatch filter)."
+    },
+    {
+      "id": "T5-godobject-global",
+      "family": "refactor-triage",
+      "anchor": null,
+      "projection": "reference-graph-indegree",
+      "goldMode": "top-indegree-files",
+      "note": "Whole-repo: gold = top-10 in-degree production files (the refactor attack order)."
+    },
+    {
+      "id": "T6-testsel-graphMatchingEngine",
+      "family": "test-selection",
+      "anchor": "graphMatchingEngine",
+      "projection": "test-subgraph",
+      "goldMode": "cochange-test-file",
+      "note": "Gold = the sibling *.test.ts(x) for the changed module (source->test pairing)."
+    }
+  ]
+}

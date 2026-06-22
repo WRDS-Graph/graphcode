@@ -1,0 +1,81 @@
+I now have everything I need. The picture is complete and grounded in the actual code. Let me write the plan.
+
+---
+
+# Plan: Splitting `src/renderer/graphRenderer.ts` (3303 lines)
+
+## What I found (grounded in this codebase)
+
+`graphRenderer.ts` is one file holding: 5 module-level pure helpers, a `buildStylesheet()` returning ~470 lines of Cytoscape style objects, and one **57-method** `CytoscapeGraphRenderer` class with **24 instance state fields**. Despite its size, its **public API is tiny** — only what `GraphPanel.tsx` and the test touch.
+
+**Public surface actually consumed by production (`GraphPanel.tsx`):**
+`new CytoscapeGraphRenderer(container)`, `onNodeClick`, `onNodeDoubleClick`, `renderGraph`, `renderOverlay`, `clearOverlay`, `resetView`, `zoomBy`, `expandAll`, `expandSharedOnly`, `collapseAll`, `destroy`. (`onNodeHover`, `setComparisonLabel`, `focusSubtree`, `getNodeTooltipData`, `applyNoveltyClassification` etc. exist but `GraphPanel` doesn't call them — confirm before treating as dead.)
+
+The other ~45 methods are `private`. This is the key fact: **the fan-in is narrow (one component + one test), and almost all complexity is private.** That makes this a *low-risk internal* refactor, not an API-breaking one.
+
+---
+
+## (1) Production files that depend on it — must be updated
+
+| File | Coupling | What changes |
+|------|----------|--------------|
+| **`src/components/GraphPanel.tsx`** | `import { CytoscapeGraphRenderer } from '@/renderer/graphRenderer'` (line 10); 12 public-method call sites (lines 44–145) | **Import path only.** If the class stays exported from `graphRenderer.ts` (re-export barrel), GraphPanel needs **zero** changes. |
+| **`src/renderer/graphRenderer.test.ts`** (942 lines) | imports `{ CytoscapeGraphRenderer, deriveNodeType }`; asserts on `getCyInstance()` internals + `__testonly_getClusterLabels()` | Import line; otherwise behavior-preserving so assertions still pass. `deriveNodeType` must remain re-exported. |
+| **`src/components/GraphPanel.test.tsx`** | references the renderer indirectly via GraphPanel | No change if public API and import path are stable. |
+| **`src/renderer/noveltyClassifier.ts`** | *imported by* graphRenderer (`classifyAllNodes`, line 24), not a consumer | No change — it's a dependency, not a dependent. Already correctly separated. |
+
+**Net:** keep `graphRenderer.ts` as the single import entry (barrel that re-exports `CytoscapeGraphRenderer` + `deriveNodeType` + types). Then **no production consumer changes at all** — the split is invisible across the module boundary. This is the safest possible shape given fan-in.
+
+---
+
+## (2) The specific seam to split along
+
+The class has four cleanly separable concerns. The honest constraint: **all the mutating methods share `this.cy` and the 24 state fields**, so I will *not* shatter the class into many classes (that forces threading state through constructors and breaks the test's `getCyInstance` assumptions). Instead, split along the seam between **stateless / config code** (pull fully out to modules) and **stateful orchestration** (keep in the class, but thinned).
+
+**Seam A — Pure, zero-`this` code → extract to standalone modules (no behavior risk):**
+
+- `src/renderer/graphStylesheet.ts` ← `buildStylesheet()` + the `SANS/SERIF/MONO` font consts (~480 lines, the single biggest chunk, touches no state).
+- `src/renderer/graphConstants.ts` ← `GROUP_META`, `ALL_GROUPS`, `MAX_FAN_SIZE`, `DEFAULT_RENDER_OPTIONS`, `NodeType`, `RenderOptions`.
+- `src/renderer/graphModel.ts` ← `deriveNodeType`, `buildChildrenMap`, `buildEdgeTypeMap`, `formatEdgeType`, `computeImportance` (pure functions over `PaperEdge[]`/`PaperNode`).
+
+That alone moves **~700+ lines out** with essentially no risk, because none of it reads `this`.
+
+**Seam B — Layout math → extract to a pure module:**
+
+- `src/renderer/graphLayout.ts` ← the fan/positioning geometry currently inlined in `renderClusterPage`, `toggleNodeExpansion`, `renderCompClusterPage` (the `baseAngle`/`fanSpread`/`fanRadius`/`stemLength` arithmetic) and the overlap solver body of `resolveOverlaps()` (lines ~1424–1452). Extract as pure functions: `computeFanPositions(origin, baseAngle, count) → {x,y}[]` and `resolveOverlaps(boxes) → positions[]`. The class methods keep the Cytoscape `.position()`/`.show()` calls but **delegate the math**. This is the highest-value extraction for testability.
+
+**Seam C — Comparison-side logic stays grouped but split by file via a `// @ts-expect`-free mixin or a second source file using `declare module` augmentation is *not* worth it.** Instead, the remaining `CytoscapeGraphRenderer` keeps all `this.cy`-mutating methods but is now ~1800 lines focused purely on stateful orchestration: render lifecycle, cluster/node expand-collapse, comparison overlay, drag, interactions.
+
+If further reduction is wanted later, the comparison methods (`toggleCompCluster`, `renderCompClusterPage`, `pageCompCluster`, `toggleCompNodeExpansion`, `renderSharedComparisonCluster`, the `comp*` state fields) form a natural future second class — but defer that; it's the riskiest cut because comparison and canonical state interleave in `renderOverlay`.
+
+**Why this seam and not "one class per concern":** The class is a god-object by *size*, not by *coupling surface* — its fan-in is 2 files. The cheap, safe win is pulling out the **stateless 700–1000 lines** (style + constants + pure helpers + layout math), which shrinks the file by ~⅓ with near-zero regression risk and gives the layout math its own unit tests. Re-architecting the stateful core into multiple collaborating classes is high-risk for low marginal benefit and should be a separate, later step.
+
+---
+
+## (3) Safe ordering of steps
+
+Each step ends with `npm test && npm run lint && npm run build` green before the next (per CLAUDE.md §5). The barrel re-export keeps every step a no-op for consumers.
+
+1. **Baseline.** Run `npm test` and record the current pass count for `graphRenderer.test.ts` (942 lines of assertions) — this is the regression oracle. Commit nothing yet.
+2. **Extract `graphConstants.ts`** (`GROUP_META`, `ALL_GROUPS`, `MAX_FAN_SIZE`, `DEFAULT_RENDER_OPTIONS`, `RenderOptions`, `NodeType`). Import them back into `graphRenderer.ts`. Re-export `NodeType`/`RenderOptions` from the barrel for type consumers. Run gates.
+3. **Extract `graphModel.ts`** (`deriveNodeType` + the 4 pure helpers). **Re-export `deriveNodeType` from `graphRenderer.ts`** — the test imports it by name from `./graphRenderer`. Run gates (the `describe('deriveNodeType')` block is the direct check).
+4. **Extract `graphStylesheet.ts`** (`buildStylesheet` + fonts). Biggest line win, zero state. Run gates — visual styling is covered indirectly by the cluster-label and node-data tests.
+5. **Extract `graphLayout.ts`** (pure fan + overlap math). This is the **only step that changes logic flow**, so do it alone: extract math as pure functions, have the class call them, and add focused unit tests for `computeFanPositions`/`resolveOverlaps` before wiring them in (TDD per the repo rules). Verify the existing expand/collapse/page tests still pass (they assert node positions/visibility). Run gates **plus** `npm run dev` smoke test of expand/collapse + "+N more" paging + comparison overlay, since this touches geometry.
+6. **(Optional, deferred)** Only if still desired: lift the comparison-side methods + `comp*` fields into a `ComparisonOverlayController` collaborator owned by the renderer. Gate behind its own PR because comparison/canonical state interleave.
+7. **Final:** confirm `graphRenderer.ts` re-exports everything the test and `GraphPanel` import, full gate run, browser smoke test.
+
+Steps 2–4 are pure moves (mechanical, reversible). Step 5 is the one with logic risk and gets its own isolated PR + tests.
+
+---
+
+## (4) Top risk
+
+**The overlap/fan layout math in Step 5 is positional and only weakly pinned by tests.** The geometry (`resolveOverlaps`, the `baseAngle`/`fanRadius`/`stemLength` arithmetic) produces exact `x,y` coordinates that feed Cytoscape `.position()`. The test suite asserts on **visibility and `isHidden` data flags** far more than on exact coordinates, so a subtle off-by-one in the extracted math (e.g. dropping the `this.currentOverlay !== null && meta.dx < 0` angle-flip at line 1161, or the overlap solver's `if (xs[j] >= xs[i])` tie-break at line 1434) can pass all unit tests while visibly breaking the layout — nodes overlapping, fans pointing into the comparison graph, or the documented **Issue #9 zoom/pan regression** (CLAUDE.md §6.4 invariant: preserve `cy.zoom()`/`cy.pan()` across mutations; `pageCluster` deliberately avoids `cy.fit()` — line 1227–1232).
+
+**Mitigation:** Treat Step 5 as behavior-preserving with character-level fidelity — move the arithmetic verbatim into pure functions (don't "clean it up" simultaneously), add unit tests asserting the extracted functions reproduce known-good coordinate outputs *captured from the current implementation first*, and require a `npm run dev` visual smoke test of: canonical expand/collapse, "+N more" paging (zoom must not jump), and a two-paper comparison overlay before merging. Keep the comparison-side extraction (Step 6) entirely separate so a layout regression can't be conflated with a comparison-state regression.
+
+---
+
+**Would you like me to execute this plan?** If so I'd start with Steps 2–4 (the safe pure-move extractions) in one pass and stop for review before the Step 5 layout extraction, since that's the one carrying regression risk.
+
+<!-- buddy: *guards the god-object* 3303 lines and only two files import it — the fan-in bark is worse than its bite -->

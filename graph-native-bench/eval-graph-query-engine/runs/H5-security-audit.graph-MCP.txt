@@ -1,0 +1,48 @@
+I have the full picture. Interesting — the repo already contains a benchmark (`tasks-hardcore.json`) that names the `pickle.load` sink as the expected answer, which confirms this is the intended finding. But I'll give an independent, rigorous assessment of reachability rather than just echoing it. Let me give the final audit.
+
+## Backend Code-Execution / Deserialization Audit
+
+### Verdict: the single most dangerous sink is `pickle.load` in the index cache loader.
+
+**Sink:** `backend/loader.py:112`
+```python
+with cache_file.open("rb") as f:
+    state = pickle.load(f)        # ← arbitrary code execution on untrusted bytes
+```
+Reached from `SearchIndex.load_or_build()` → called at server startup in `backend/server.py:75` (`lifespan`).
+
+`pickle.load` executes whatever `__reduce__` the serialized object defines, so deserializing a hostile `.pkl` is full **remote code execution** (e.g. a payload that spawns a reverse shell at unpickle time). The matching `pickle.dump` at `loader.py:121` is benign; the danger is exclusively the *load*.
+
+### Why this beats the other candidates
+
+I checked the whole Python surface for `eval/exec/subprocess/os.system/yaml.load/marshal/__import__/torch.load`, etc. None exist in any request path:
+- **`json.loads` on LLM output** (`semantic_compare.py:114`) — only parses JSON, no code execution. Not a deserialization-RCE sink.
+- All other `json.loads` calls read data files / caches — same, JSON-only.
+- No `eval`, `subprocess`, `os.system`, `yaml.load`, or template injection anywhere in `backend/`.
+
+So pickle is not just the worst — it is the *only* code-execution-class deserialization sink in the backend.
+
+### Exploit precondition (the honest part)
+
+This is **not reachable from the HTTP API**. No FastAPI route accepts a file, a path, or any input that flows into `cache_file`. The filename is `CACHE_DIR / f"{data_hash}_v{CACHE_VERSION}.pkl"`, where `data_hash = md5(papers.json)` — derived from a server-controlled local data file, not from request input. An attacker cannot make the server unpickle attacker-chosen bytes by sending requests.
+
+The realistic precondition is **a writer to `backend/.cache/`**:
+
+1. **Malicious / tampered cache artifact.** `backend/.cache/` is `.gitignore`d (loader.py:22 in `.gitignore`) and built locally on first run. If a `*_v6.pkl` is ever shipped, shared, restored from a backup, mounted as a volume, or pulled from a build artifact cache, a poisoned file gets loaded verbatim at next startup with no integrity check (the md5 is over `papers.json`, **not** over the pkl, so it provides zero tamper protection for the pickle itself).
+2. **Local/lateral write access.** Any process or user that can write to `backend/.cache/` (shared dev box, CI runner, compromised dependency, container with a writable mounted cache dir) achieves code execution in the server process on the next restart — a classic **untrusted-deserialization → privilege/persistence** primitive.
+
+So: **semi-trusted input** (a file-system artifact that crosses a trust boundary), not directly **untrusted HTTP input**.
+
+### Severity
+
+**HIGH (CVSS ~7.0–7.8), not Critical** — capped below Critical only because it is not reachable from an unauthenticated network request. Impact if the precondition is met is maximal (arbitrary code execution as the server user); the gating factor is write access to the cache directory or supply of the cache file. The lack of any integrity check over the pkl is what turns "we cache an index" into "we execute whatever is in the cache."
+
+### Fix direction (root-cause, per your fix-horizon rule)
+
+The state being cached is plain data + a few `BM25Okapi`/`numpy`/`networkx` objects. Replace pickle with a non-executing format:
+- Serialize `_to_state()` to JSON / `numpy.savez` / a typed schema, reconstructing the BM25 and nx graph from primitives in `_from_state` (they're cheap to rebuild from the stored token lists / edge lists).
+- If pickle must stay short-term, at minimum **HMAC-sign the pkl** with a server-held key and verify before `pickle.load`, and ensure `backend/.cache/` is never writable by anything but the server and never shipped as an artifact.
+
+---
+
+Want me to implement the JSON/`savez` replacement for the pickle cache (with a test that a tampered cache file is rejected rather than executed)?

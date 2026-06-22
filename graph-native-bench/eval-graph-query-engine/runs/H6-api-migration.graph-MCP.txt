@@ -1,0 +1,61 @@
+I now have a complete picture. The codegraph index reported only one *direct* in-graph caller (`preloadPaperGraphs`) because `loadPaperGraph` is a closure exposed through the `DataLayer` interface — every external call goes through a `dl.loadPaperGraph(...)` / `dataLayer.loadPaperGraph(...)` property access, which a static call graph under-reports. The grep against the live source confirms the full set. Here it is.
+
+## `loadPaperGraph` signature change — complete call-site inventory
+
+**Proposed signature:** `loadPaperGraph(slug: string)` → `loadPaperGraph(options: { slug: string })`, and at call sites `loadPaperGraph(x)` → `loadPaperGraph({ slug: x })`.
+
+### A. Definition + interface declaration (must change first)
+
+| # | File:line | Current | Edit |
+|---|-----------|---------|------|
+| D1 | `src/data/dataLayer.ts:21` | `loadPaperGraph(slug: string): Promise<PaperGraph \| null>;` (interface `DataLayer`) | `loadPaperGraph(options: { slug: string }): Promise<PaperGraph \| null>;` |
+| D2 | `src/data/dataLayer.ts:184` | `async function loadPaperGraph(slug: string)` | `async function loadPaperGraph({ slug }: { slug: string })` — body uses `slug` unchanged (lines 186, 189, 197, 198) |
+
+### B. Production call sites (the actual `loadPaperGraph(...)` invocations)
+
+| # | File:line | Current call | Edit |
+|---|-----------|--------------|------|
+| 1 | `src/data/dataLayer.ts:227` | `await loadPaperGraph(slug)` | `await loadPaperGraph({ slug })` — **internal**, inside `preloadPaperGraphs` |
+| 2 | `src/App.tsx:294` | `await dl.loadPaperGraph(slug)` | `await dl.loadPaperGraph({ slug })` — canonical-confirm handler |
+| 3 | `src/App.tsx:402` | `dl.loadPaperGraph(compSlug)` | `dl.loadPaperGraph({ slug: compSlug })` — comparison handler, inside `Promise.all`. **Note the arg is `compSlug`, not `slug`** |
+| 4 | `src/retrieval/graphPath.ts:66` | `await dataLayer.loadPaperGraph(p.slug)` | `await dataLayer.loadPaperGraph({ slug: p.slug })` |
+| 5 | `src/retrieval/graphPath.ts:88` | `await dataLayer.loadPaperGraph(p.slug)` | `await dataLayer.loadPaperGraph({ slug: p.slug })` |
+| 6 | `src/retrieval/bm25Path.ts:50` | `await dataLayer.loadPaperGraph(paper.slug)` | `await dataLayer.loadPaperGraph({ slug: paper.slug })` |
+| 7 | `src/retrieval/bm25Path.ts:89` | `await dataLayer.loadPaperGraph(s.slug)` | `await dataLayer.loadPaperGraph({ slug: s.slug })` |
+| 8 | `src/retrieval/hybrid.ts:33` | `await dataLayer.loadPaperGraph(canonical.slug)` | `await dataLayer.loadPaperGraph({ slug: canonical.slug })` |
+| 9 | `src/retrieval/hybrid.ts:71` | `await dataLayer.loadPaperGraph(fusedEntry.slug)` | `await dataLayer.loadPaperGraph({ slug: fusedEntry.slug })` |
+
+That's **9 production call expressions** (1 internal + 8 via the public interface).
+
+### C. Indirect callers — reach `loadPaperGraph` transitively through `preloadPaperGraphs`
+
+`preloadPaperGraphs` (`src/data/dataLayer.ts:224`) calls `loadPaperGraph` at site #1. **Its own `(slugs: string[])` signature does NOT change**, so it absorbs the change and its callers need **no edit** — but a complete migration must verify each one, not silently skip it:
+
+- `src/data/dataLayer.ts:149` — `await preloadPaperGraphs(papers.map((p) => p.slug))` (fallback in `initialize`) → **no edit**
+- `src/App.tsx:203` — `dl.preloadPaperGraphs(slugs)` (background preload effect) → **no edit**
+- `src/query/queryEngine.ts:737` — `await dataLayer.preloadPaperGraphs(tier1Slugs)` → **no edit**
+
+> Caveat: this holds *only because* you keep `preloadPaperGraphs`'s array signature. If you also convert `preloadPaperGraphs` to an options object, these three flip to required edits.
+
+### D. Test call sites (real, non-mocked `loadPaperGraph` — break under new signature)
+
+- `src/data/dataLayer.test.ts` lines **150, 156, 164, 173, 181, 294, 295, 313, 339, 340, 352** — each `dl.loadPaperGraph('xxx')` → `dl.loadPaperGraph({ slug: 'xxx' })`
+- `src/query/queryEngine.test.ts:177` — `dataLayer.loadPaperGraph('transformer')` → `{ slug: 'transformer' }`
+- `src/query/typeahead.test.ts` lines **124, 133, 141** — `await dataLayer.loadPaperGraph('transformer')` → `{ slug: 'transformer' }`
+
+Also note `src/data/dataLayer.test.ts:192, 202` call `preloadPaperGraphs([...])` — **no edit**, but they exercise the indirect path and serve as the regression guard that site #1 is correct.
+
+### E. Not code — no edits
+
+Docs/specs mention `loadPaperGraph` (`.kiro/specs/...`, `docs/superpowers/...`, `.claude/graph/CODE_GRAPH.md`) — update only if you want docs in sync; they don't affect compilation.
+
+---
+
+### Summary
+
+- **2 declaration edits** (interface + function definition)
+- **9 production call-site edits** (1 internal to dataLayer, 2 in App.tsx, 2 graphPath, 2 bm25Path, 2 hybrid)
+- **15 test call-site edits** across 3 test files
+- **3 indirect callers** via `preloadPaperGraphs` — verified, **0 edits** (contingent on keeping `preloadPaperGraphs`'s array signature)
+
+The one easy-to-miss item is **App.tsx:402**, where the argument variable is `compSlug` rather than `slug` — `{ slug: compSlug }`, not `{ slug }`. The indirect tier (`preloadPaperGraphs` callers) is the other thing a naive grep-for-`loadPaperGraph` would skip entirely, since those lines never mention `loadPaperGraph`.

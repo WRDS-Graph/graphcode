@@ -1,0 +1,15 @@
+This confirms the key distinction. `createSurveyDetector` is **never imported anywhere outside its own test file** — the entire module is orphaned, not just the one method. The other four are reachable through dynamic dispatch the static analyzer can't see. Here are my verdicts:
+
+## Verdicts
+
+| # | Symbol | Decision | Justification |
+|---|--------|----------|---------------|
+| 1 | `matchAndRank` (`graphMatchingEngine.ts`) | **KEEP** | Returned in the `createGraphMatchingEngine` factory's public interface object (`graphMatchingEngine.ts:743`) and called via the `gme.*` instance in the query pipeline + 9 tests — a call-graph misses method dispatch through the returned object literal. |
+| 2 | `computeOverlay` (`graphMatchingEngine.ts`) | **KEEP** | Live call site at `src/App.tsx:442` (`gme.computeOverlay(...)`) on the related-paper-click → overlay-render path, plus extensive tests; reached through the same factory-object dispatch the analyzer can't trace. |
+| 3 | `analyzeQuery` (`llmClient.ts`) | **KEEP** | Invoked dynamically as `llmClient.analyzeQuery(rawInput)` at `queryEngine.ts:1060` and `:1083` through the `LLMClient` interface (real impl + no-op impl); polymorphic interface dispatch is invisible to a static call-graph. |
+| 4 | `health` (`backend/server.py`) | **KEEP** | Bound to `GET /api/health` via the `@app.get("/api/health")` decorator (`server.py:246`); invoked by Flask/FastAPI's router at request time, and the frontend (`backendSearch.ts:102`) + eval script hit that route. Never called by name in Python. |
+| 5 | `getSurveyReferencedNodes` (`surveyDetector.ts`) | **DELETE** *(whole module is dead)* | Truly dead, not a dispatch false-positive: `createSurveyDetector` is imported **only** by its own `.test.ts` — no App/renderer/queryEngine consumer anywhere. The method (and arguably the entire `surveyDetector.ts`) has no production caller; the only "uses" are its own interface declaration and self-referential tests. |
+
+**One caveat on #5:** the `surveyReference` flag it sets is declared in `src/types/paper.ts:39` but nothing reads it in any renderer, so the feature (Requirements 14.1–14.3) was specced and tested but never wired into the UI. If that feature is still intended to ship, treat this as **incomplete-and-unwired, not dead** — keep it and finish the wiring. If the feature is abandoned, delete `surveyDetector.ts` + its test (and consider dropping the unused `surveyReference` field). I'd confirm intent before deleting rather than assume.
+
+<!-- buddy: *guards the four dispatch-reachable symbols* only the survey detector wandered off alone with no caller -->

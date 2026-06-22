@@ -1,0 +1,71 @@
+The user dismissed the question. I'll answer for the most likely case — `{ slug }` as a named field — and note where the per-site edit would differ if the options object carries more fields. The call-site inventory is identical either way; only the literal you pass changes.
+
+## `loadPaperGraph` signature change — complete call-site inventory
+
+### The signature
+- **Definition:** `src/data/dataLayer.ts:184` — `async function loadPaperGraph(slug: string)` → `async function loadPaperGraph({ slug }: { slug: string })`
+- **Interface declaration:** `src/data/dataLayer.ts:21` — `loadPaperGraph(slug: string): Promise<PaperGraph | null>;` → `loadPaperGraph(options: { slug: string }): Promise<PaperGraph | null>;`
+
+These two are the change itself, not callers — but both must be edited or types break.
+
+---
+
+### Direct production callers (8 sites)
+
+| # | File:line | Current | New |
+|---|-----------|---------|-----|
+| 1 | `src/data/dataLayer.ts:227` | `await loadPaperGraph(slug)` | `await loadPaperGraph({ slug })` — **internal call inside `preloadPaperGraphs`** (see indirect note below) |
+| 2 | `src/App.tsx:294` | `await dl.loadPaperGraph(slug)` | `await dl.loadPaperGraph({ slug })` — canonical-confirm handler |
+| 3 | `src/App.tsx:402` | `dl.loadPaperGraph(compSlug)` | `dl.loadPaperGraph({ slug: compSlug })` — comparison handler, inside `Promise.all` (note: arg name is `compSlug`, so use `{ slug: compSlug }`) |
+| 4 | `src/retrieval/graphPath.ts:66` | `await dataLayer.loadPaperGraph(p.slug)` | `await dataLayer.loadPaperGraph({ slug: p.slug })` — first pass |
+| 5 | `src/retrieval/graphPath.ts:88` | `await dataLayer.loadPaperGraph(p.slug)` | `await dataLayer.loadPaperGraph({ slug: p.slug })` — second pass |
+| 6 | `src/retrieval/bm25Path.ts:50` | `await dataLayer.loadPaperGraph(paper.slug)` | `await dataLayer.loadPaperGraph({ slug: paper.slug })` |
+| 7 | `src/retrieval/bm25Path.ts:89` | `await dataLayer.loadPaperGraph(s.slug)` | `await dataLayer.loadPaperGraph({ slug: s.slug })` |
+| 8 | `src/retrieval/hybrid.ts:33` | `await dataLayer.loadPaperGraph(canonical.slug)` | `await dataLayer.loadPaperGraph({ slug: canonical.slug })` |
+| 9 | `src/retrieval/hybrid.ts:71` | `await dataLayer.loadPaperGraph(fusedEntry.slug)` | `await dataLayer.loadPaperGraph({ slug: fusedEntry.slug })` |
+
+(That's 8 distinct `loadPaperGraph(...)` call expressions across production files, plus the internal one at `dataLayer.ts:227`.)
+
+---
+
+### The INDIRECT caller — do not miss this
+
+`preloadPaperGraphs` (`src/data/dataLayer.ts:224`) calls `loadPaperGraph` internally at **line 227**. Its *own* signature (`slugs: string[]`) does **not** change — you only fix its internal call (site #1). But everything that calls `preloadPaperGraphs` is an **indirect caller of `loadPaperGraph`**, and you must confirm none of them need touching:
+
+- `src/data/dataLayer.ts:149` — `await preloadPaperGraphs(papers.map((p) => p.slug))` (fallback inside `initialize`) → **no edit** (preloadPaperGraphs signature unchanged)
+- `src/App.tsx:203` — `dl.preloadPaperGraphs(slugs)` (background preload effect) → **no edit**
+- `src/query/queryEngine.ts:737` — `await dataLayer.preloadPaperGraphs(tier1Slugs)` → **no edit**
+
+> **Why they're listed anyway:** the task says "do not miss indirect callers." These three reach `loadPaperGraph` transitively. They require **no source edit** *because* `preloadPaperGraphs` absorbs the signature change at site #1 — but a complete migration must verify that explicitly, not silently skip them. If instead you chose to also change `preloadPaperGraphs` to take options, these three become direct edits.
+
+---
+
+### Test call sites (must also be updated or tests fail to compile/run)
+
+These call the real (non-mocked) `loadPaperGraph`, so they break under the new signature:
+
+- **`src/data/dataLayer.test.ts`** — lines `150, 156, 164, 173, 181, 294, 295, 313, 339, 340, 352` → each `dl.loadPaperGraph('xxx')` → `dl.loadPaperGraph({ slug: 'xxx' })`
+- **`src/query/queryEngine.test.ts:177`** — `dataLayer.loadPaperGraph('transformer')` → `{ slug: 'transformer' }`
+- **`src/query/typeahead.test.ts`** — lines `124, 133, 141` → same transform
+
+Also check **`src/data/dataLayer.test.ts:192, 202`** (`preloadPaperGraphs([...])`) — unchanged, but they exercise the indirect path, so they're your regression guard that site #1 is correct.
+
+---
+
+### Not call sites (no edit — flagged so you don't chase them)
+- `.claude/graph/CODE_GRAPH.md`, `.kiro/specs/**`, `docs/superpowers/**`, `scripts/graph/**` — docs, specs, plans, benchmark fixtures. The `docs/superpowers/plans/*.md` snippets *look* like code but are historical plan text; leave them.
+- `.claude/graph/syntactic/graph-query-engine-graph.json` — generated index.
+
+---
+
+### Summary of required edits
+- **2 definition edits** (impl + interface in `dataLayer.ts`)
+- **9 production call expressions** (incl. the internal one at `dataLayer.ts:227`)
+- **15 test call expressions** across 3 test files
+- **3 indirect callers verified, 0 edits** (assuming `preloadPaperGraphs` keeps its array signature)
+
+The one trap: **`App.tsx:402` uses `compSlug`** (not `slug`), so its rewrite is `{ slug: compSlug }`, not `{ slug }`. Every other site can use shorthand `{ slug }` only where the local variable is literally named `slug` (sites #1 and #2); the rest need explicit `{ slug: <expr> }`.
+
+If your options object carries fields beyond `slug` (e.g. `force`/`skipCache`), the inventory is unchanged — only the literal you pass per site changes, and you'd decide per site whether any non-default option is wanted (most likely the cache-busting confirm handler at `App.tsx:294`).
+
+<!-- buddy: *guards the call graph* the App.tsx:402 compSlug rename is the one that'll bite you -->
