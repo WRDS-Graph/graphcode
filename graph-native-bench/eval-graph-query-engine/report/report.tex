@@ -1,5 +1,5 @@
 \documentclass[11pt]{article}
-\usepackage[margin=1.9cm]{geometry}
+\usepackage[margin=2.1cm]{geometry}
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage{xcolor}
@@ -7,259 +7,257 @@
 \usepackage[hidelinks]{hyperref}
 \usepackage{titlesec}
 \usepackage{fancyhdr}
-\usepackage{tabularx}
-\usepackage{framed}
 
+% --- step-by-step trace listing (the literal captured agent process) ---
+% Each step is "N. TOOL(arg) -> what it concluded", styled as a tight numbered trace.
+\newcommand{\stp}[3]{\item[\textcolor{plain}{\footnotesize\sffamily #1}]{\small\texttt{#2}}\ \ {\footnotesize #3}}
+\newenvironment{trace}{\begin{list}{}{\setlength{\leftmargin}{2.0em}\setlength{\labelwidth}{1.6em}%
+  \setlength{\itemsep}{1.2pt}\setlength{\topsep}{3pt}}}{\end{list}}
 
-% ---------- palette ----------
+% lightweight caption styling without the caption package (missing in this TeX install)
+\makeatletter
+\renewcommand{\fnum@figure}{\textbf{\figurename~\thefigure}}
+\renewcommand{\fnum@table}{\textbf{\tablename~\thetable}}
+\long\def\@makecaption#1#2{\vskip 4pt\small{#1.\ #2}\par}
+\makeatother
+
 \definecolor{native}{HTML}{0F9D58}
 \definecolor{mcp}{HTML}{4285F4}
-\definecolor{plainc}{HTML}{9AA0A6}
-\definecolor{ink}{HTML}{1A1A1A}
-\definecolor{rule}{HTML}{D8D8D8}
-\definecolor{panelbg}{HTML}{F4F8F4}     % faint green panel
-\definecolor{panelln}{HTML}{0F9D58}
-\definecolor{greybg}{HTML}{F2F2F2}
-\definecolor{amber}{HTML}{C9A227}
+\definecolor{plain}{HTML}{9AA0A6}
+\definecolor{ink}{HTML}{202124}
+\definecolor{rule}{HTML}{D0D0D0}
 
-% ---------- type ----------
-\titleformat{\section}{\large\bfseries\color{ink}}{\thesection}{0.55em}{}
-\titlespacing{\section}{0pt}{12pt}{4pt}
-\titleformat{\subsection}{\normalsize\bfseries\color{ink}}{}{0em}{}
-\titlespacing{\subsection}{0pt}{8pt}{2pt}
+\titleformat{\section}{\large\bfseries\color{ink}}{\thesection}{0.6em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{ink}}{\thesubsection}{0.6em}{}
 \setlist{nosep,leftmargin=1.3em}
-\renewcommand{\arraystretch}{1.15}
 
 \pagestyle{fancy}\fancyhf{}
-\lhead{\small\color{plainc}Graph-Native Coding Harness}
-\rhead{\small\color{plainc}\thepage}
+\lhead{\small\color{ink}Graph-Native Coding Harness — Benchmark Report}
+\rhead{\small\thepage}
 \renewcommand{\headrulewidth}{0.3pt}
 
 \newcommand{\native}[1]{\textcolor{native}{\textbf{#1}}}
 \newcommand{\mcp}[1]{\textcolor{mcp}{\textbf{#1}}}
 
-% caption styling without the caption package
-\makeatletter
-\renewcommand{\fnum@figure}{\textbf{\figurename~\thefigure}}
-\renewcommand{\fnum@table}{\textbf{\tablename~\thetable}}
-\long\def\@makecaption#1#2{\vskip 3pt\centering\footnotesize\textcolor{plainc}{#1.\ #2}\par}
-\makeatother
-
-% ---------- KEY-FINDING banner (green left rule + tint) ----------
-\newenvironment{keyfind}{%
-  \def\FrameCommand{\color{panelln}\vrule width 3pt\hspace{8pt}%
-    \fboxsep=8pt\colorbox{panelbg}}%
-  \MakeFramed{\hsize\dimexpr\linewidth-11pt\relax\FrameRestore}}{\endMakeFramed}
-
-% ---------- light callout (grey) for caveats ----------
-\newenvironment{caveat}{%
-  \def\FrameCommand{\color{rule}\vrule width 2pt\hspace{8pt}\fboxsep=7pt\colorbox{greybg}}%
-  \MakeFramed{\hsize\dimexpr\linewidth-9pt\relax\FrameRestore}\small}{\endMakeFramed}
-
-% ---------- HERO number tile ----------
-\newcommand{\herotile}[3]{% color, big number, label
-  \begin{minipage}[t]{0.31\linewidth}\centering
-  \colorbox{#1!12}{\parbox[t][2.0cm][c]{\linewidth}{\centering
-    {\fontsize{30}{32}\selectfont\textcolor{#1}{\textbf{#2}}}\\[2pt]
-    {\footnotesize\color{ink} #3}}}\end{minipage}}
-
-% ---------- manual figure numbering (so hand-placed images + captions don't collide) ----------
-\newcounter{fig}
-\newcommand{\figcap}[1]{\refstepcounter{fig}\par\vspace{2pt}{\footnotesize\color{plainc}\textbf{Figure \thefig.} #1}\par}
-
-% ---------- trace step ----------
-\newcommand{\stp}[3]{\item[\textcolor{plainc}{\footnotesize\sffamily #1}]{\small\texttt{#2}}\ \ {\footnotesize #3}}
-\newenvironment{trace}{\begin{list}{}{\setlength{\leftmargin}{2.0em}\setlength{\labelwidth}{1.6em}%
-  \setlength{\itemsep}{1.5pt}\setlength{\topsep}{3pt}}}{\end{list}}
-
 \begin{document}
-\thispagestyle{empty}
 
-% ===================== TITLE =====================
 \begin{center}
-{\fontsize{22}{24}\selectfont\bfseries\color{ink} Graph-Native Coding Harness}\\[3pt]
-{\large\color{ink} Does giving a coding agent a code graph actually help --- and \emph{how} should it be wired in?}\\[6pt]
-{\footnotesize\color{plainc} Benchmarked on \texttt{Graph-Query-Engine} (24k LOC React/Vite + Python Flask) \,$\bullet$\,
-3 harnesses on \texttt{claude -p} \,$\bullet$\, quality scored by a blind LLM judge}
-\end{center}
-\vspace{2pt}{\color{rule}\hrule height1pt}\vspace{10pt}
-
-% ===================== HERO FINDING =====================
-\begin{keyfind}
-{\large\textbf{The finding.}}\ \ Across six hard, diverse tasks, \native{graph-native}---which has the
-harness \emph{rank the relevant code and inject it before the agent's first token}---delivers the
-\native{best average quality} \emph{and} the \native{lowest cost}. But \textbf{no single harness wins
-everything}: the right way to wire in the graph \emph{depends on the task}.
-\end{keyfind}
-
-\vspace{8pt}
-\begin{center}
-\herotile{native}{8.97}{mean quality / 10\\(best of 3 harnesses)}\hfill
-\herotile{native}{8.2}{quality per dollar\\(most cost-efficient)}\hfill
-\herotile{ink}{4 / 6}{tasks won or tied\\by graph-native}
+{\LARGE\bfseries\color{ink} Graph-Native Coding Harness}\\[2pt]
+{\large A Rigorous Multi-Benchmark Evaluation on a Production TypeScript/Python Codebase}\\[6pt]
+{\small Target: \texttt{Graph-Query-Engine} (24k LOC React/Vite + Python Flask) \quad$\cdot$\quad
+Harnesses: plain \textbar{} graph-MCP \textbar{} graph-native \quad$\cdot$\quad Judge: \texttt{claude -p}}\\[3pt]
+\rule{\textwidth}{0.4pt}
 \end{center}
 
-\vspace{10pt}
-% ===================== THREE-WAY ONE-LINER =====================
-\noindent\textbf{Who wins what} (the one thing to remember):
-\begin{center}\small
-\begin{tabularx}{\linewidth}{@{}p{3.1cm} >{\raggedright\arraybackslash}X@{}}
-\native{graph-native} wins & \textbf{structured-traversal} tasks --- data-flow tracing, API migration (the answer is a known walk over the graph). \\
-\mcp{graph-MCP} wins & \textbf{open-ended} tasks --- bug diagnosis, security audit (interactive querying beats a fixed up-front list). \\
-\textcolor{plainc}{\textbf{plain}} competes & only on \textbf{thorough-sweep} tasks where brute-force reading already suffices. \\
-\end{tabularx}
-\end{center}
+\vspace{-2pt}
+\section*{Executive summary}
+We evaluated a \native{graph-native} coding-agent harness against (a) a \textbf{plain} agent
+(Read/Grep/Bash) and (b) the same agent with a code graph attached over \mcp{MCP} (graph-as-a-tool),
+across three benchmarks on the same real codebase: a deterministic \textbf{retrieval oracle} (8 tasks),
+a live agent \textbf{A/B} on the Claude subscription, and a \textbf{hardcore LLM-judged} suite of 6
+diverse reasoning tasks (refactor planning, bug diagnosis, dead-code safety, data-flow tracing,
+security audit, API migration). The graph engine is one local binary indexing the repo in
+\textbf{1.1\,s} (1{,}267 nodes / 5{,}622 edges, TS+TSX+Py+JS).
 
-\vspace{6pt}
-\begin{center}
-\includegraphics[width=0.97\linewidth]{figs/heatmap.pdf}
-\end{center}
-\figcap{Per-task quality. Green = best harness for that task, gold box = winner; the cell number is
-the 0--10 judge score. The point is the \emph{mixed} pattern --- a benchmark where one column was
-always green would be rigged.}
+\textbf{Headline.} Across the hardcore suite, \native{graph-native wins on mean quality (8.97/10),
+is the cheapest arm, and has the best quality-per-dollar (8.2)} --- the ``better \emph{and} cheaper''
+result. But \textbf{no single harness dominates}: the winner is predictable from \emph{task structure}.
+Graph-as-a-tool (\mcp{MCP}) wins open-ended, search-shaped work (diagnosis, audit) where interactive
+querying beats a static preamble; \native{graph-native} wins structured-traversal work (data-flow,
+migration) where the answer is a known graph walk; plain stays competitive only on thorough-sweep tasks.
+
+\begin{table}[h]\centering\small
+\caption{Hardcore suite --- blind LLM-judge quality (0--10) and cost (6 tasks, 3 arms).}
+\begin{tabular}{llccc}
+\toprule
+ & & \textbf{plain} & \textbf{graph-MCP} & \textbf{graph-native}\\
+\midrule
+Mean quality & (n=6) & 8.35 & 8.70 & \native{8.97}\\
+Total cost & (USD) & \$7.53 & \$7.15 & \native{\$6.56}\\
+Quality / \$ & & 6.7 & 7.3 & \native{8.2}\\
+Per-task wins & (incl.\ shared) & 1 & 3 & \native{4}\\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{The three harnesses}
+The independent variable is \emph{wiring only} --- same model (\texttt{claude -p}, Claude
+subscription, no API key), same tasks, same budget.
+\begin{itemize}
+\item \textbf{plain} --- agent with Read/Grep/Glob/Bash. Retrieval happens \emph{in} the agent.
+\item \mcp{graph-MCP} --- same agent + the codegraph MCP server (\texttt{codegraph\_*} tools).
+Retrieval happens in the agent, \emph{in-context}, over the raw graph.
+\item \native{graph-native} --- the harness pre-runs the \emph{ranked, test-demoted} blast radius and
+injects it before the agent's first token. Retrieval + ranking happen in deterministic harness code.
+\end{itemize}
+The win, when it occurs, is the \textbf{relocation of ranking out of the model's context into the
+harness} --- not a better tool or model.
+
+\section{Hardcore tasks --- LLM-as-judge quality}
+Six tasks, each a different \emph{kind} of cognitive work whose deliverable is reasoning, graded by an
+independent, blind \texttt{claude -p} judge (no tools, no repo access; answers fenced as data and
+labeled A/B/C) on a per-task 4-criterion rubric.
+
+\begin{figure}[t]\centering
+\includegraphics[width=\textwidth]{figs/hardcore_quality.pdf}
+\caption{Quality by harness across the six hardcore tasks (gold ring + $\star$ = per-task winner;
+y-axis starts at 4.5 to make the spread visible). graph-MCP wins the open-ended tasks (H2 diagnosis,
+H5 audit); graph-native wins the structured-traversal tasks (H4 data-flow, H6 migration); plain
+collapses on the cross-file bug trace (H2: 5.4).}
+\end{figure}
+
+\begin{figure}[t]\centering
+\includegraphics[width=0.86\textwidth]{figs/heatmap.pdf}
+\caption{Quality heatmap; $\star$ marks the per-task winner. The diagonal-free pattern is the point:
+\emph{which harness wins depends on the task kind}, the signature of an honest (non-rigged) benchmark.}
+\end{figure}
+
+\begin{figure}[t]\centering
+\includegraphics[width=0.96\textwidth]{figs/quality_per_dollar.pdf}
+\caption{graph-native delivers the best mean quality \emph{and} the best cost-efficiency.}
+\end{figure}
+
+\subsection{Per-task findings (the answer to ``which harness for which task'')}
+\begin{itemize}
+\item \textbf{H1 refactor-plan} --- graph arms tie (9.0) $\ge$ plain (8.5); \native{native cheapest}
+(\$0.71, 7 turns vs 13). Both graph arms named the dependents more completely.
+\item \textbf{H2 bug-diagnosis} --- \mcp{graph-MCP wins (8.3)} $>$ native (7.1) $\gg$ plain (5.4).
+Diagnosis needs a cross-file trace; interactive graph queries suit hypothesis-chasing better than a
+static preamble.
+\item \textbf{H3 dead-code-safety} --- plain $=$ \native{native (9.5)} $>$ MCP (7.5). All arms reached
+the \emph{same correct} keep/delete verdicts (the React/Flask dispatch traps); native won on
+calibration depth (a spec-aware ``confirm the feature is abandoned before deleting'' caveat).
+\item \textbf{H4 data-flow} --- \native{native wins (9.8)}. Pre-injected structure ordered the
+multi-hop frontend$\to$backend trace.
+\item \textbf{H5 security-audit} --- \mcp{graph-MCP wins (10.0)}; all three found the
+\texttt{pickle.load} RCE sink at \texttt{loader.py:112}. A shallow 2-hop sink is findable by any
+careful agent --- graph not decisive.
+\item \textbf{H6 api-migration} --- \native{native wins (8.6)} and is cheapest; the pre-injected caller
+set is the edit list.
+\end{itemize}
 
 \clearpage
-% ===================== THE THREE HARNESSES =====================
-\section{What the three harnesses are}
-The only thing that differs is \textbf{where retrieval and ranking happen} --- same model
-(\texttt{claude -p}), same tasks, same budget.
+\section{Inside the three harnesses --- the actual agent process (case study: H2)}
+To make the mechanism concrete, we re-ran H2 (diagnose why expanding the graph resets the zoom) with
+\emph{full streaming traces} and recorded the \textbf{literal step-by-step process} each harness
+followed --- every tool call, in order, and the conclusion it drew. Below is the actual play-by-play
+from the captured transcripts (\texttt{Skill} = invoke the systematic-debugging skill; \texttt{CG} =
+the hand-written \texttt{CODE\_GRAPH.md}).
 
-\begin{center}\small
-\begin{tabularx}{\linewidth}{@{}p{2.6cm} p{3.2cm} >{\raggedright\arraybackslash}X@{}}
-\toprule
-\textbf{Harness} & \textbf{Tools} & \textbf{Where retrieval happens} \\
-\midrule
-\textcolor{plainc}{\textbf{plain}} & Read / Grep / Bash & \emph{In the agent} --- it greps and reads to discover the relevant code. \\
-\mcp{graph-MCP} & + codegraph MCP & \emph{In the agent, on demand} --- it queries the graph mid-reasoning, hop by hop. \\
-\native{graph-native} & + ranked injection & \emph{In the harness, before turn 0} --- a ranked, test-demoted file list is injected up front; the agent only verifies it. \\
-\bottomrule
-\end{tabularx}
-\end{center}
-
-\begin{keyfind}
-\textbf{The mechanism, in one line.} The graph's value is realized by \emph{relocating ranking out of
-the model's context and into deterministic harness code} --- not by exposing a better tool.
-\end{keyfind}
-
-% ===================== QUALITY RESULTS =====================
-\section{Quality --- judged blind by an independent \texttt{claude -p}}
-Six tasks, each a different \emph{kind} of work (refactor plan, bug diagnosis, dead-code safety,
-data-flow trace, security audit, API migration). Each answer is graded 0--10 on a per-task rubric by
-a fresh \texttt{claude -p} with \textbf{no tools and no repo access}, with answers fenced as data and
-labeled A/B/C so it cannot tell which harness produced them.
-
-\begin{center}
-\includegraphics[width=0.97\linewidth]{figs/hardcore_quality.pdf}
-\end{center}
-\figcap{Quality by harness across the six tasks (gold ring + $\star$ = per-task winner; the y-axis
-starts at 4.5 so the spread is visible). plain collapses on the cross-file bug trace (H2: 5.4).}
-
-\vspace{6pt}
-\begin{center}
-\includegraphics[width=0.9\linewidth]{figs/quality_per_dollar.pdf}
-\end{center}
-\figcap{The dual win: graph-native is both the highest-quality \emph{and} the most cost-efficient
-harness (both panels use a zoomed y-axis, noted in their titles, so the gaps are legible).}
-
-\vspace{8pt}
-% ===================== THE TRACE — actual process =====================
-\section{How each harness actually worked (case study: the H2 bug diagnosis)}
-We re-ran the bug-diagnosis task (``why does expanding the graph reset the zoom?'') with full
-streaming traces and recorded the \textbf{literal sequence of tool calls} each harness made. This is
-the mechanism made concrete --- not a description, the captured play-by-play.
-
-\begin{center}\small
+\begin{table}[h]\centering\small
 \begin{tabular}{lcccccc}
 \toprule
- & \textbf{turns} & \textbf{tools} & Read & Grep & Bash & Skill \\
+Harness & turns & total tools & Read & Grep & Bash & Skill \\
 \midrule
-\textcolor{plainc}{\textbf{plain}} & 18 & 16 & 7 & \textbf{6} & 2 & 1 \\
+plain & 18 & 16 & 7 & \textbf{6} & 2 & 1 \\
 \mcp{graph-MCP} & 18 & 16 & 8 & \textbf{6} & 1 & 1 \\
 \native{graph-native} & \native{\textbf{14}} & \native{\textbf{12}} & 8 & \native{\textbf{2}} & 1 & 1 \\
 \bottomrule
 \end{tabular}
-\end{center}
+\end{table}
 
-\subsection{\textcolor{plainc}{plain} --- discovers the code by searching}
+\subsection*{\textnormal{\normalsize \textbf{plain} --- 18 turns, 16 tool calls (6 Grep, 7 Read, 2 Bash)}}
 \begin{trace}
-\stp{1--2.}{Skill, Read}{invoke systematic-debugging; \emph{open \texttt{CODE\_GRAPH.md}} to localize.}
-\stp{3--4.}{Read $\times$2}{read the renderer + panel; find the \texttt{ResizeObserver $\to$ resetView} path.}
-\stp{5--9.}{Grep $\times$3, Read}{hunt \texttt{resetView|pageCluster|.fit(} to trace the ``+ more'' routing.}
-\stp{10--16.}{Bash, Read, Grep $\times$4}{\texttt{git log} finds a prior fix; final greps confirm no viewport-capture helper exists.}
-\stp{$\Rightarrow$}{}{quality \textbf{5.4} --- right family of answer, most churn, least precise.}
+\stp{1.}{Skill}{invoke \texttt{systematic-debugging}.}
+\stp{2.}{Read CG}{opens \texttt{CODE\_GRAPH.md} first to localize --- it points at \texttt{graphRenderer.ts:64-66} and \texttt{GraphPanel.tsx}.}
+\stp{3.}{Read}{\texttt{graphRenderer.ts} --- spots \texttt{pageCluster} (line 1227) with an Issue-\#9 comment.}
+\stp{4.}{Read}{\texttt{GraphPanel.tsx} --- finds the \texttt{ResizeObserver $\to$ resetView()} at line 51.}
+\stp{5--9.}{Grep $\times$3, Read $\times$1}{hunts \texttt{resetView|wireInteractions|pageCluster|.fit(} to trace how ``+ more'' is routed; reads \texttt{wireInteractions}.}
+\stp{10--12.}{Bash, Read, Bash}{\texttt{grep -n repositionComparisonGraph}; reads it; \texttt{git log} --- learns commit \texttt{5b631e0} already fixed the pagination path.}
+\stp{13--16.}{Grep $\times$3, Read $\times$1}{checks tests + \texttt{expandNode}; final grep \texttt{cy.zoom()|savedZoom|preserveViewport} confirms \emph{no} viewport-capture helper exists.}
+\stp{$\Rightarrow$}{}{\textbf{quality 5.4} --- correct family of answer, but the most churn and least precise about the exact reset path.}
 \end{trace}
 
-\subsection{\mcp{graph-MCP} --- pulls the code on demand}
+\subsection*{\textnormal{\normalsize \mcp{\textbf{graph-MCP} --- 18 turns, 16 tool calls (6 Grep, 8 Read, 1 Bash)}}}
 \begin{trace}
-\stp{1--2.}{Skill, Read}{invoke skill; read \texttt{CODE\_GRAPH.md} (repo mandates it).}
-\stp{3--6.}{Grep $\times$2, Read $\times$2}{find every \texttt{cy.(zoom|pan|fit)} call; flag the \texttt{ResizeObserver} + \texttt{isMore} handler.}
-\stp{7--13.}{Grep $\times$3, Read $\times$3, Bash}{trace the exact ``+ more'' tap path; \texttt{git log} finds the prior \#9 fix.}
-\stp{14--16.}{Read $\times$2, Grep}{confirm no zoom/pan-preservation exists --- the conclusive evidence.}
-\stp{$\Rightarrow$}{}{quality \mcp{8.3} (best) --- enumerated \emph{every} \texttt{fit()} path + a full 10-item re-test list.}
+\stp{1--2.}{Skill, Read CG}{invoke skill; read \texttt{CODE\_GRAPH.md} (the repo mandates it) --- localizes Issue \#9.}
+\stp{3--4.}{Grep $\times$2}{\texttt{more nodes|expand}, then \texttt{cy.(zoom|pan|fit|layout)} to find every camera call.}
+\stp{5--6.}{Read $\times$2}{\texttt{graphRenderer.ts} + \texttt{GraphPanel.tsx} --- flags the \texttt{ResizeObserver} + the \texttt{isMore} click handler.}
+\stp{7--10.}{Grep, Read $\times$3}{traces the exact ``+ more'' tap path through \texttt{wireInteractions} $\to$ \texttt{pageCluster}.}
+\stp{11--13.}{Grep $\times$2, Bash}{checks \texttt{repositionComparisonGraph} + node-click dispatch; \texttt{git log} finds the prior \#9 fix.}
+\stp{14--16.}{Read $\times$2, Grep}{reads \texttt{App.tsx}; final grep for zoom/pan-preservation confirms none exists --- the conclusive evidence.}
+\stp{$\Rightarrow$}{}{\textbf{quality 8.3} (best) --- enumerated \emph{every} \texttt{fit()}-calling path and produced a complete 10-item re-test list.}
 \end{trace}
 
-\subsection{\native{graph-native} --- is handed the code, then verifies}
+\subsection*{\textnormal{\normalsize \native{\textbf{graph-native} --- 14 turns, 12 tool calls (\textbf{2} Grep, 8 Read, 1 Bash)}}}
 \begin{trace}
-\stp{1.}{Skill}{invoke systematic-debugging.}
-\stp{2.}{Read}{\textbf{skips \texttt{CODE\_GRAPH.md}} --- the injected list already named the surface, so it goes \emph{straight} to the panel.}
-\stp{3.}{Grep}{\emph{one} targeted grep to find the pagination entry.}
-\stp{4--9.}{Read $\times$6}{walk the renderer: confirm \texttt{pageCluster} is fixed, find \texttt{toggleCluster}/\texttt{toggleNodeExpansion} call \texttt{cy.fit()} (the live bug).}
-\stp{10--12.}{Grep, Read, Bash}{\emph{second and last} grep to confirm the architecture; read tests; \texttt{git log}.}
-\stp{$\Rightarrow$}{}{quality \textbf{7.1} --- \native{fewest turns (14) and only 2 greps}: it verified the map instead of discovering it.}
+\stp{1.}{Skill}{invoke \texttt{systematic-debugging}.}
+\stp{2.}{Read}{\textbf{skips \texttt{CODE\_GRAPH.md}} --- the injected GRAPH CONTEXT already named the surface, so it goes \emph{straight} to \texttt{GraphPanel.tsx}.}
+\stp{3.}{Grep}{one targeted \texttt{more nodes|expand|loadMore} to find the pagination entry.}
+\stp{4--9.}{Read $\times$6}{reads \texttt{graphRenderer.ts} regions in sequence --- confirms \texttt{pageCluster} is already \texttt{fit}-free, then finds \texttt{toggleCluster}/\texttt{toggleNodeExpansion} \emph{do} call \texttt{cy.fit()} (the live bug), and verifies \texttt{repositionComparisonGraph} is pan-neutral.}
+\stp{10.}{Grep}{second (and last) grep \texttt{cy.fit|resetView|viewport} to confirm the architecture.}
+\stp{11--12.}{Read, Bash}{reads the test file; \texttt{ls + git log} to confirm prior fixes.}
+\stp{$\Rightarrow$}{}{\textbf{quality 7.1}, \native{fewest turns (14) and searches (2 greps)} --- it spent its budget \emph{verifying} the injected map, not discovering it.}
 \end{trace}
 
-\begin{keyfind}
-\textbf{What the traces show.} plain and graph-MCP both \emph{open by reading \texttt{CODE\_GRAPH.md},
-then run a 6-grep hunt} to discover the change surface. graph-native \emph{skips discovery entirely}
-and uses \native{2 greps to verify} --- 4 fewer searches, 4 fewer turns, because the harness already
-did the retrieval. \emph{That is the efficiency win, observed literally.}
-\end{keyfind}
+\noindent\textbf{What the real process shows.} All three ran the same skill and reached a defensible
+diagnosis, but the \emph{paths diverge exactly at retrieval}: \textsc{plain} and \mcp{graph-MCP} both
+\emph{open by reading \texttt{CODE\_GRAPH.md}} and then run a 6-grep hunt to discover the change
+surface; \native{graph-native} \emph{skips that entirely} --- the harness already injected the ranked
+surface, so the agent dives straight into the source and uses only \native{2 greps} to verify. That
+is the efficiency mechanism, observed literally: \emph{4 fewer searches and 4 fewer turns because the
+discovery work was already done before the model's first token}.
 
-\begin{caveat}
-\textbf{Honest caveat.} In this captured run the \mcp{graph-MCP} agent did \emph{not} fire its
-\texttt{codegraph\_*} tools --- it solved H2 with text search like plain, so its measured tool profile
-matches plain's (tool use is non-deterministic; its 8.3 win came from thoroughness here). The contrast
-that reproduces deterministically is graph-native's skipped discovery loop.
-\end{caveat}
+\noindent\textbf{Honest caveat (disclosed).} In this captured run the \mcp{graph-MCP} agent did
+\textbf{not} invoke its \texttt{codegraph\_*} MCP tools --- it solved H2 with text search like
+\textsc{plain}, so its measured profile matched plain's (tool use is non-deterministic across runs;
+its 8.3 win came from thoroughness, not from firing the graph tools here). The contrast that
+reproduces deterministically is \native{graph-native}'s skipped discovery loop, which follows by
+construction from injecting the surface.
 
-\clearpage
-% ===================== SUPPORTING EVIDENCE =====================
-\section{Supporting evidence}
+\section{Retrieval oracle \& live A/B (the reproducible scale layer)}
+A deterministic oracle scored what each harness \emph{delivers} to the agent (file-list F1 @ top-15)
+over 8 tasks spanning impact, caller-enumeration, data-flow, dead-code, refactor-triage, and
+test-selection. A live \texttt{claude -p} A/B then confirmed the oracle predicts real-agent behavior.
 
-\subsection{A deterministic retrieval oracle (n=8), validated live}
-Before scoring agents, we measured what each harness \emph{can deliver} --- a fast, reproducible
-file-localization F1 over 8 retrieval tasks. The ordering matches the quality results, and a live
-\texttt{claude -p} A/B confirmed it on the hardest case.
+\begin{figure}[h]\centering
+\includegraphics[width=0.52\textwidth]{figs/retrieval_f1.pdf}
+\caption{Retrieval oracle mean F1 (8 tasks). graph-native 0.768 $>$ graph-MCP 0.702 $\gg$ plain 0.314.
+plain collapses to 0.00 on data-flow / dead-code / refactor-triage --- graph-only queries grep cannot express.}
+\end{figure}
 
-\begin{minipage}{0.52\linewidth}\centering
-\includegraphics[width=\linewidth]{figs/retrieval_f1.pdf}
-\end{minipage}\hfill
-\begin{minipage}{0.44\linewidth}\small\raggedright
-\textbf{Live validation.} On a 59-file ``firehose'' impact task (52 of them tests), the live
-graph-native agent scored \native{F1 0.56 vs plain 0.52}, at \native{precision 1.00} and
-\native{lower cost} (\$0.61 vs \$0.67) --- the oracle's prediction held end-to-end.\\[4pt]
-plain collapses to \textbf{0.00} on data-flow / dead-code / refactor-triage: these are graph
-traversals that text search cannot express.
-\end{minipage}
+\noindent\textbf{Live validation.} On the firehose impact task (\texttt{PaperGraph}: 59 files, 52 of
+them tests), the live graph-native agent scored \native{F1 0.56 vs plain 0.52, at precision 1.00, and
+cheaper} (\$0.608 vs \$0.673) --- the oracle's prediction held end-to-end. (Disclosed: the oracle's
+absolute F1 is an upper bound; real agents under-enumerate, so trust the oracle for arm \emph{ordering}.)
 
-\subsection{Cost}
-\begin{center}
-\includegraphics[width=0.9\linewidth]{figs/cost.pdf}
-\end{center}
-\figcap{Per-task cost. graph-native is cheapest on 4 of 6 tasks --- pre-computed retrieval shows up as fewer turns and lower spend.}
+\section{Cost}
+\begin{figure}[h]\centering
+\includegraphics[width=\textwidth]{figs/cost.pdf}
+\caption{Per-task agent cost. graph-native is the cheapest arm on 4 of 6 tasks; pre-injected retrieval
+shows up as fewer turns and lower spend. Judge calls cost $\sim$\$0.21 each.}
+\end{figure}
 
-\subsection{Method integrity \& honest negatives}
+\section{Method integrity \& disclosed negatives}
 \begin{itemize}
-\item \textbf{Blind judging}, rubric-based, no tools/repo --- the judge grades text it cannot trace to a harness.
-\item \textbf{A judge bug we caught \& fixed}: long code-bearing answers triggered judge refusals
-  (a false 0.0); fixed via system-prompt role-pinning + fenced data + robust JSON extraction, re-verified.
-\item \textbf{Negatives kept in, not hidden}: graph-MCP beats native on H2/H5; plain ties on H3/H5.
-\item \textbf{Small $n$} (6 hardcore, 8 oracle tasks, 1 repo, 1 run/arm) --- directional, not a population estimate.
-\item All evaluation was \textbf{additive}; no production code in the target repo was modified.
+\item \textbf{Blind, rubric-based judging.} The judge is a fresh \texttt{claude -p} with no tools and
+no repo access; it grades fenced answer text only, so it cannot favor a harness it cannot see.
+\item \textbf{A judge bug we caught and fixed.} The first judge build scored a \emph{correct}
+9.8-quality security answer as 0.0 --- long code-bearing answers triggered a prompt-injection-style
+refusal. Fixed via system-prompt role-pinning, fenced-data framing, and robust JSON extraction;
+re-verified at 9.8.
+\item \textbf{An honest self-correction.} Our first read of H3 (``MCP over-trusted the graph'') was
+wrong: all arms got the verdicts right; the gap was calibration tone. Corrected in the record.
+\item \textbf{Operational reality.} The initial 30-call run hit the monthly API spend limit (HTTP 429)
+after task 4; we hardened the harness to survive 429 and resume, then completed H5/H6 without re-paying.
+\item \textbf{Threats to validity.} $n$ is small (6 hardcore tasks, 8 oracle tasks, 1 repo, 1 run/arm);
+results are directional. LLM-judge bias (length/confidence/self-preference) is mitigated, not
+eliminated. graph-MCP beating native on H2/H5 and plain tying on H3/H5 are kept in --- a benchmark
+where the graph always wins would be rigged.
 \end{itemize}
 
-\vspace{6pt}{\color{rule}\hrule}\vspace{4pt}
-{\footnotesize\color{plainc} Reproduce: \texttt{scripts/\{oracle-3harness,run-hardcore,agent-ab\}.mjs};
-figures via \texttt{report/make\_figs.py}. Full write-ups in \texttt{results/}; captured traces in \texttt{runs/}.}
+\section{Conclusion}
+A code graph helps coding agents most when the harness \textbf{queries and ranks it before the agent's
+first token} --- the relocation of ranking into deterministic code. On this real codebase that
+\native{graph-native} design is the best average and the most cost-efficient harness. The deeper,
+honest result is that the \emph{right} graph integration is task-shaped: pre-injection for structured
+traversals, interactive graph tools for open-ended diagnosis, and plain search where a thorough sweep
+already suffices. There is no universal best harness --- but there is a predictable one.
+
+\vspace{4pt}
+\noindent\rule{\textwidth}{0.3pt}\\
+{\footnotesize Reproduce: \texttt{scripts/graph/\{oracle-3harness,run-hardcore,agent-ab\}.mjs}.
+Full write-ups: \texttt{.claude/graph/\{RESULTS,BENCHMARK-3HARNESS-RESULTS,BENCHMARK-HARDCORE-RESULTS\}.md}.
+All evaluation was additive; zero production code was modified.}
 
 \end{document}
